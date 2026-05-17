@@ -1685,8 +1685,9 @@ int main(int argc, char* argv[]) {
                                 for (auto& instr : blk.instrs) {
                                     if (instr.op == GrOp::CALL && instr.simplified
                                         && instr.dst.kind == GrValue::LABEL && instr.dst.imm > 0) {
-                                        uint32_t targetRVA = (uint32_t)(instr.dst.imm & 0xFFFFFFFF);
-                                        if (targetRVA == 0 || targetRVA >= soi) continue;
+                                        uint64_t targetRva64 = (uint64_t)instr.dst.imm - actualBase;
+                                        if (targetRva64 == 0 || targetRva64 >= soi) continue;
+                                        uint32_t targetRVA = (uint32_t)targetRva64;
                                         uint32_t callRVA = (uint32_t)(instr.addr - actualBase);
                                         uint32_t off = pe.rvaToOffset(callRVA);
                                         if (!off || off + instr.rawLen > pe.data.size()) continue;
@@ -1814,8 +1815,9 @@ int main(int argc, char* argv[]) {
                             for (auto& instr : blk.instrs) {
                                 if (instr.op == GrOp::CALL && instr.simplified
                                     && instr.dst.kind == GrValue::LABEL && instr.dst.imm > 0) {
-                                    uint32_t targetRVA = (uint32_t)(instr.dst.imm & 0xFFFFFFFF);
-                                    if (targetRVA == 0 || targetRVA >= soi) continue;
+                                    uint64_t targetRva64 = (uint64_t)instr.dst.imm - actualBase;
+                                    if (targetRva64 == 0 || targetRva64 >= soi) continue;
+                                    uint32_t targetRVA = (uint32_t)targetRva64;
                                     uint32_t callRVA = (uint32_t)(instr.addr - actualBase);
                                     if (globalPatchedSites.count(callRVA)) continue;
                                     siteTargetsB[callRVA].insert(targetRVA);
@@ -2347,9 +2349,9 @@ int main(int argc, char* argv[]) {
                             for (auto& instr : blk.instrs)
                                 if (instr.simplified && instr.dst.kind == GrValue::LABEL && instr.dst.imm > 0
                                     && (instr.op == GrOp::JMP || instr.op == GrOp::CALL)) {
-                                    uint32_t target = (uint32_t)(instr.dst.imm & 0xFFFFFFFF);
-                                    if (target > 0 && target < soi2)
-                                        localJmps.push_back({(uint32_t)(instr.addr-actualBase), target, (uint8_t)instr.rawLen});
+                                    uint64_t targetRva64 = (uint64_t)instr.dst.imm - actualBase;
+                                    if (targetRva64 > 0 && targetRva64 < soi2)
+                                        localJmps.push_back({(uint32_t)(instr.addr-actualBase), (uint32_t)targetRva64, (uint8_t)instr.rawLen});
                                 }
 
                         mba.livenessDCE(func);

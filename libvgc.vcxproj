@@ -49,6 +49,7 @@
       <ObjectFileName>$(IntDir)griffin_log.obj</ObjectFileName>
     </ClCompile>
     <ClCompile Include="src\log.cpp" />
+    <ClCompile Include="..\libpefix\src\constprop.cpp" />
     <ClCompile Include="..\libpefix\src\pe.cpp" />
     <ClCompile Include="..\libpefix\src\sections.cpp" />
     <ClCompile Include="..\libpefix\src\xrefs.cpp" />

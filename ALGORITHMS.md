@@ -74,7 +74,7 @@ flowchart TD
     D --> E[Output: field setter candidates with confidence]
 ```
 
-## Vtable resolution
+## Vtable layout recovery
 
 ```mermaid
 flowchart TD
@@ -83,3 +83,39 @@ flowchart TD
     C --> D[Walk forward, name each slot<br/>by protoc-lite layout]
     D --> E[Cross-check with COFF symbol names<br/>resolve ICF-shared functions]
 ```
+
+## Vtable call devirtualization
+
+Once layouts are known, indirect vcalls `mov rax,[rcx]; call [rax+N]` get rewritten
+to direct `call sub_X`. Three resolver phases run after RTTI + type propagation:
+
+```mermaid
+flowchart TD
+    SEED[Seed funcType:<br/>RTTI ctors, default_instances, proto messages] --> PROP
+    PROP[Bidirectional worklist:<br/>caller<->callee type flow] --> PA
+
+    subgraph PA[Phase A: typed]
+        PA1[Per typed func F, vtRVA] --> PA2[Run pefix::ConstProp<br/>with seedReg = vtRVA]
+        PA2 --> PA3[Collect CALL with<br/>simplified+LABEL dst]
+        PA3 --> PA4[Patch E8 disp32, NOP tail]
+    end
+
+    PA --> PB
+    subgraph PB[Phase B: untyped brute]
+        PB1[For each untyped func with vcall] --> PB2[Try every known vtRVA<br/>on RCX/RDX/R8]
+        PB2 --> PB3[Patch only when single<br/>unambiguous target]
+    end
+
+    PB --> PC
+    subgraph PC[Phase C: slot consensus]
+        PC1[For each remaining vcall] --> PC2[Check slot N across<br/>all 348 vtables]
+        PC2 --> PC3{All vtables agree?}
+        PC3 -->|Yes| PC4[Patch]
+        PC3 -->|No| PC5[Skip]
+    end
+```
+
+Phase A does the heavy lifting -- it's where the dataflow engine (pefix::ConstProp,
+augmented with TypedPtr propagation through `mov rax,[rcx]` and CALL mem-operand
+resolution) converts the vtable seed into a concrete call target. Phases B and C
+sweep the residual cases.
