@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64"><Configuration>Debug</Configuration><Platform>x64</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{C3D4E5F6-3333-4444-5555-666677778888}</ProjectGuid>
+    <RootNamespace>libvgc</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ConfigurationType>Application</ConfigurationType>
+    <PlatformToolset>$(DefaultPlatformToolset)</PlatformToolset>
+    <UseDebugLibraries>true</UseDebugLibraries>
+  </PropertyGroup>
+  <PropertyGroup Label="Configuration" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ConfigurationType>Application</ConfigurationType>
+    <PlatformToolset>$(DefaultPlatformToolset)</PlatformToolset>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup>
+    <OutDir>$(ProjectDir)build\$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)build\$(Configuration)\obj\</IntDir>
+    <TargetName>libvgc</TargetName>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)..\libpefix\include;$(ProjectDir)..\libgriffin\include;$(ProjectDir)vendor\unicorn\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <DisableSpecificWarnings>4819;4458</DisableSpecificWarnings>
+      <PreprocessorDefinitions>WIN32_LEAN_AND_MEAN;NOMINMAX;USE_UNICORN;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <AdditionalLibraryDirectories>$(ProjectDir)vendor\unicorn\lib</AdditionalLibraryDirectories>
+      <AdditionalDependencies>unicorn.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <!-- libpefix sources -->
+    <ClCompile Include="..\libpefix\src\log.cpp">
+      <ObjectFileName>$(IntDir)pefix_log.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\libgriffin\src\log.cpp">
+      <ObjectFileName>$(IntDir)griffin_log.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="src\log.cpp" />
+    <ClCompile Include="..\libpefix\src\pe.cpp" />
+    <ClCompile Include="..\libpefix\src\sections.cpp" />
+    <ClCompile Include="..\libpefix\src\xrefs.cpp" />
+    <ClCompile Include="..\libpefix\src\exports.cpp" />
+    <ClCompile Include="..\libpefix\src\coffsyms.cpp" />
+    <ClCompile Include="..\libpefix\src\x86_64\disasm.cpp" />
+    <ClCompile Include="..\libpefix\src\x86_64\emu.cpp" />
+    <ClCompile Include="..\libpefix\src\x86_64\trace.cpp" />
+    <ClCompile Include="..\libpefix\src\analysis.cpp" />
+    <!-- libgriffin sources -->
+    <ClCompile Include="..\libgriffin\src\dispatch.cpp" />
+    <ClCompile Include="..\libgriffin\src\int3.cpp" />
+    <ClCompile Include="..\libgriffin\src\jmpres.cpp" />
+    <ClCompile Include="..\libgriffin\src\mba.cpp" />
+    <ClCompile Include="..\libgriffin\src\patch.cpp" />
+    <ClCompile Include="..\libgriffin\src\output.cpp" />
+    <ClCompile Include="..\libgriffin\src\xref_trace.cpp" />
+    <!-- libvgc sources -->
+    <ClCompile Include="src\antidisasm.cpp" />
+    <ClCompile Include="src\thunks.cpp" />
+    <ClCompile Include="src\imports.cpp" />
+    <ClCompile Include="src\symbols.cpp" />
+    <ClCompile Include="src\funcfix.cpp" />
+    <ClCompile Include="src\srcmap.cpp" />
+    <ClCompile Include="src\pdb.cpp" />
+    <ClCompile Include="src\output\idc.cpp" />
+    <ClCompile Include="src\griffin\proto_scan.cpp" />
+    <ClCompile Include="src\griffin\ucemu.cpp" />
+    <ClCompile Include="src\griffin\z3solve.cpp" />
+    <ClCompile Include="tools\libvgc.cpp" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

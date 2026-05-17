@@ -1,0 +1,6 @@
+﻿[submodule "deps/libpefix"]
+	path = deps/libpefix
+	url = https://github.com/hajunwon/libpefix.git
+[submodule "deps/libgriffin"]
+	path = deps/libgriffin
+	url = https://github.com/hajunwon/libgriffin.git

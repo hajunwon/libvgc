@@ -1,0 +1,20 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Build Release",
+            "type": "shell",
+            "command": "${workspaceFolder}/build.bat",
+            "group": {"kind": "build", "isDefault": true},
+            "problemMatcher": "$msCompile"
+        },
+        {
+            "label": "Build (no Unicorn)",
+            "type": "shell",
+            "command": "${workspaceFolder}/build.bat",
+            "args": ["--no-unicorn"],
+            "group": "build",
+            "problemMatcher": "$msCompile"
+        }
+    ]
+}

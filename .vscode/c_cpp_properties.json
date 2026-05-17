@@ -1,0 +1,22 @@
+{
+    "configurations": [
+        {
+            "name": "Win64",
+            "includePath": [
+                "${workspaceFolder}/include",
+                "${workspaceFolder}/../libpefix/include",
+                "${workspaceFolder}/../libgriffin/include",
+                "${workspaceFolder}/deps/libpefix/include",
+                "${workspaceFolder}/deps/libgriffin/include",
+                "${workspaceFolder}/vendor/unicorn/include"
+            ],
+            "defines": ["_WIN64", "WIN32_LEAN_AND_MEAN", "NOMINMAX", "NDEBUG", "USE_UNICORN"],
+            "windowsSdkVersion": "10.0",
+            "compilerPath": "cl.exe",
+            "cStandard": "c17",
+            "cppStandard": "c++17",
+            "intelliSenseMode": "windows-msvc-x64"
+        }
+    ],
+    "version": 4
+}
