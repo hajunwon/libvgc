@@ -1660,7 +1660,11 @@ int main(int argc, char* argv[]) {
                 std::mutex vtMtx;
 
                 auto vtWorker = [&]() {
-                    std::vector<std::tuple<uint32_t,uint32_t,uint32_t,uint8_t>> localPatches; // callRVA,targetRVA,patchOff,totalLen
+                    struct PatchInfo {
+                        uint32_t callRVA, targetRVA, patchRVA, patchOff;
+                        uint8_t totalLen, opcode;
+                    };
+                    std::vector<PatchInfo> localPatches;
                     while (true) {
                         uint32_t i = vtIdx.fetch_add(1);
                         if (i >= funcTypeVec.size()) break;
@@ -1683,22 +1687,59 @@ int main(int argc, char* argv[]) {
 
                             for (auto& blk : tf.blocks)
                                 for (auto& instr : blk.instrs) {
-                                    if (instr.op == GrOp::CALL && instr.simplified
-                                        && instr.dst.kind == GrValue::LABEL && instr.dst.imm > 0) {
-                                        uint64_t targetRva64 = (uint64_t)instr.dst.imm - actualBase;
-                                        if (targetRva64 == 0 || targetRva64 >= soi) continue;
-                                        uint32_t targetRVA = (uint32_t)targetRva64;
-                                        uint32_t callRVA = (uint32_t)(instr.addr - actualBase);
-                                        uint32_t off = pe.rvaToOffset(callRVA);
-                                        if (!off || off + instr.rawLen > pe.data.size()) continue;
-                                        uint32_t patchOff = off, patchRVA = callRVA, totalLen = instr.rawLen;
-                                        if (off >= 3) {
-                                            uint8_t p0=pe.data[off-3],p1=pe.data[off-2],p2=pe.data[off-1];
-                                            if ((p0&0xF8)==0x48 && p1==0x8B && (p2>>6)==0)
-                                                { patchOff=off-3; patchRVA=callRVA-3; totalLen=3+instr.rawLen; }
-                                        }
-                                        if (totalLen >= 5)
-                                            localPatches.push_back({callRVA, targetRVA, patchOff, (uint8_t)totalLen});
+                                    bool isCall = (instr.op == GrOp::CALL);
+                                    bool isJmp  = (instr.op == GrOp::JMP);
+                                    if (!isCall && !isJmp) continue;
+                                    if (!instr.simplified) continue;
+                                    if (instr.dst.kind != GrValue::LABEL || instr.dst.imm <= 0) continue;
+
+                                    uint64_t targetRva64 = (uint64_t)instr.dst.imm - actualBase;
+                                    if (targetRva64 == 0 || targetRva64 >= soi) continue;
+                                    uint32_t targetRVA = (uint32_t)targetRva64;
+                                    uint32_t callRVA = (uint32_t)(instr.addr - actualBase);
+                                    uint32_t off = pe.rvaToOffset(callRVA);
+                                    if (!off || off + instr.rawLen > pe.data.size()) continue;
+
+                                    // ConstProp rewrote dst to LABEL; decode the original base
+                                    // reg from raw bytes so we can match the preceding mov.
+                                    int callBaseReg = -1;
+                                    uint8_t b0 = pe.data[off];
+                                    if (b0 >= 0x40 && b0 <= 0x4F && off + 2 < pe.data.size() && pe.data[off+1] == 0xFF) {
+                                        callBaseReg = (pe.data[off+2] & 7) + ((b0 & 1) ? 8 : 0);
+                                    } else if (b0 == 0xFF && off + 1 < pe.data.size()) {
+                                        callBaseReg = pe.data[off+1] & 7;
+                                    }
+                                    if (callBaseReg < 0) continue;
+
+                                    uint32_t patchOff = off, patchRVA = callRVA, totalLen = instr.rawLen;
+                                    auto tryAbsorb = [&](uint32_t movLen, uint8_t expectedMod) -> bool {
+                                        if (off < movLen) return false;
+                                        uint8_t rex = pe.data[off - movLen];
+                                        if ((rex & 0xF8) != 0x48) return false;
+                                        if (pe.data[off - movLen + 1] != 0x8B) return false;
+                                        uint8_t modrm = pe.data[off - movLen + 2];
+                                        if ((modrm >> 6) != expectedMod) return false;
+                                        uint8_t rm = modrm & 7;
+                                        if (rm == 4) return false;
+                                        if (expectedMod == 0 && rm == 5) return false;
+                                        int movDst = ((modrm >> 3) & 7) + ((rex & 0x04) ? 8 : 0);
+                                        if (movDst != callBaseReg) return false;
+                                        patchOff  = off - movLen;
+                                        patchRVA  = callRVA - movLen;
+                                        totalLen  = movLen + instr.rawLen;
+                                        return true;
+                                    };
+                                    tryAbsorb(3, 0) || tryAbsorb(4, 1) || tryAbsorb(7, 2);
+
+                                    if (totalLen >= 5) {
+                                        PatchInfo p;
+                                        p.callRVA   = callRVA;
+                                        p.targetRVA = targetRVA;
+                                        p.patchRVA  = patchRVA;
+                                        p.patchOff  = patchOff;
+                                        p.totalLen  = (uint8_t)totalLen;
+                                        p.opcode    = isJmp ? 0xE9 : 0xE8;
+                                        localPatches.push_back(p);
                                     }
                                 }
                         }
@@ -1709,17 +1750,14 @@ int main(int argc, char* argv[]) {
                         }
                     }
 
-                    // Apply patches (thread-safe: different PE offsets)
                     std::lock_guard<std::mutex> lk(vtMtx);
-                    for (auto& [callRVA, targetRVA, patchOff, totalLen] : localPatches) {
-                        if (globalPatchedSites.count(callRVA)) continue;
-                        uint32_t patchRVA = callRVA;
-                        if (patchOff < pe.rvaToOffset(callRVA)) patchRVA = callRVA - 3;
-                        int32_t d = (int32_t)(targetRVA - (patchRVA + 5));
-                        pe.data[patchOff] = 0xE8;
-                        memcpy(pe.data.data() + patchOff + 1, &d, 4);
-                        for (uint32_t n = 5; n < totalLen; n++) pe.data[patchOff+n] = 0x90;
-                        globalPatchedSites.insert(callRVA);
+                    for (auto& p : localPatches) {
+                        if (globalPatchedSites.count(p.callRVA)) continue;
+                        int32_t d = (int32_t)(p.targetRVA - (p.patchRVA + 5));
+                        pe.data[p.patchOff] = p.opcode;
+                        memcpy(pe.data.data() + p.patchOff + 1, &d, 4);
+                        for (uint32_t n = 5; n < p.totalLen; n++) pe.data[p.patchOff + n] = 0x90;
+                        globalPatchedSites.insert(p.callRVA);
                         vtCallResolved++;
                         passResolved++;
                     }
@@ -1787,7 +1825,8 @@ int main(int argc, char* argv[]) {
                 for (uint32_t i = 0; i + 2 < fSize && i < 0x2000; i++) {
                     if (pe.data[fOff+i] != 0xFF) continue;
                     uint8_t modrm = pe.data[fOff+i+1];
-                    if (((modrm >> 3) & 7) == 2 && (modrm >> 6) >= 1 && (modrm >> 6) <= 2) {
+                    uint8_t opExt = (modrm >> 3) & 7;
+                    if ((opExt == 2 || opExt == 4) && (modrm >> 6) >= 1 && (modrm >> 6) <= 2) {
                         hasVtCall = true; break;
                     }
                 }
@@ -1798,9 +1837,8 @@ int main(int argc, char* argv[]) {
                 if (!textDisasm.buildCFG(fb.beginRVA, tf)) continue;
                 auto origB = tf.blocks;
 
-                // Try each known vtable on multiple registers
-                std::unordered_map<uint32_t, std::set<uint32_t>> siteTargetsB;
-                std::unordered_map<uint32_t, uint8_t> siteRawLenB;
+                struct SiteInfo { std::set<uint32_t> targets; uint8_t rawLen; bool isJmp; };
+                std::unordered_map<uint32_t, SiteInfo> siteInfoB;
                 for (uint32_t vtRVA : allSeedVtRVAs) {
                     for (GrReg reg : {GrReg::RCX, GrReg::RDX, GrReg::R8}) {
                         tf.blocks = origB;
@@ -1813,40 +1851,63 @@ int main(int argc, char* argv[]) {
 
                         for (auto& blk : tf.blocks) {
                             for (auto& instr : blk.instrs) {
-                                if (instr.op == GrOp::CALL && instr.simplified
-                                    && instr.dst.kind == GrValue::LABEL && instr.dst.imm > 0) {
-                                    uint64_t targetRva64 = (uint64_t)instr.dst.imm - actualBase;
-                                    if (targetRva64 == 0 || targetRva64 >= soi) continue;
-                                    uint32_t targetRVA = (uint32_t)targetRva64;
-                                    uint32_t callRVA = (uint32_t)(instr.addr - actualBase);
-                                    if (globalPatchedSites.count(callRVA)) continue;
-                                    siteTargetsB[callRVA].insert(targetRVA);
-                                    siteRawLenB[callRVA] = instr.rawLen;
-                                }
+                                bool isCall = (instr.op == GrOp::CALL);
+                                bool isJmp  = (instr.op == GrOp::JMP);
+                                if (!isCall && !isJmp) continue;
+                                if (!instr.simplified) continue;
+                                if (instr.dst.kind != GrValue::LABEL || instr.dst.imm <= 0) continue;
+                                uint64_t targetRva64 = (uint64_t)instr.dst.imm - actualBase;
+                                if (targetRva64 == 0 || targetRva64 >= soi) continue;
+                                uint32_t targetRVA = (uint32_t)targetRva64;
+                                uint32_t callRVA = (uint32_t)(instr.addr - actualBase);
+                                if (globalPatchedSites.count(callRVA)) continue;
+                                auto& s = siteInfoB[callRVA];
+                                s.targets.insert(targetRVA);
+                                s.rawLen = instr.rawLen;
+                                s.isJmp = isJmp;
                             }
                         }
                     }
                 }
 
-                // Patch unambiguous
-                for (auto& [callRVA, targets] : siteTargetsB) {
-                    if (targets.size() != 1) continue;
+                for (auto& [callRVA, s] : siteInfoB) {
+                    if (s.targets.size() != 1) continue;
                     if (globalPatchedSites.count(callRVA)) continue;
-                    uint32_t targetRVA = *targets.begin();
-                    uint8_t rawLen = siteRawLenB[callRVA];
+                    uint32_t targetRVA = *s.targets.begin();
                     uint32_t off = pe.rvaToOffset(callRVA);
                     if (!off) continue;
-                    uint32_t patchOff = off, totalLen = rawLen;
-                    uint32_t patchRVA = callRVA;
-                    if (off >= 3) {
-                        uint8_t p0 = pe.data[off-3], p1 = pe.data[off-2], p2 = pe.data[off-1];
-                        if ((p0 & 0xF8) == 0x48 && p1 == 0x8B && (p2 >> 6) == 0) {
-                            patchOff = off - 3; patchRVA = callRVA - 3; totalLen = 3 + rawLen;
-                        }
+
+                    int callBaseReg = -1;
+                    uint8_t b0 = pe.data[off];
+                    if (b0 >= 0x40 && b0 <= 0x4F && off + 2 < pe.data.size() && pe.data[off+1] == 0xFF) {
+                        callBaseReg = (pe.data[off+2] & 7) + ((b0 & 1) ? 8 : 0);
+                    } else if (b0 == 0xFF && off + 1 < pe.data.size()) {
+                        callBaseReg = pe.data[off+1] & 7;
                     }
+                    if (callBaseReg < 0) continue;
+
+                    uint32_t patchOff = off, patchRVA = callRVA, totalLen = s.rawLen;
+                    auto tryAbsorbB = [&](uint32_t movLen, uint8_t expectedMod) -> bool {
+                        if (off < movLen) return false;
+                        uint8_t rex = pe.data[off - movLen];
+                        if ((rex & 0xF8) != 0x48) return false;
+                        if (pe.data[off - movLen + 1] != 0x8B) return false;
+                        uint8_t modrm = pe.data[off - movLen + 2];
+                        if ((modrm >> 6) != expectedMod) return false;
+                        uint8_t rm = modrm & 7;
+                        if (rm == 4) return false;
+                        if (expectedMod == 0 && rm == 5) return false;
+                        int movDst = ((modrm >> 3) & 7) + ((rex & 0x04) ? 8 : 0);
+                        if (movDst != callBaseReg) return false;
+                        patchOff = off - movLen; patchRVA = callRVA - movLen;
+                        totalLen = movLen + s.rawLen;
+                        return true;
+                    };
+                    tryAbsorbB(3, 0) || tryAbsorbB(4, 1) || tryAbsorbB(7, 2);
+
                     if (totalLen >= 5) {
                         int32_t d = (int32_t)(targetRVA - (patchRVA + 5));
-                        pe.data[patchOff] = 0xE8;
+                        pe.data[patchOff] = s.isJmp ? 0xE9 : 0xE8;
                         memcpy(pe.data.data() + patchOff + 1, &d, 4);
                         for (uint32_t n = 5; n < totalLen; n++) pe.data[patchOff+n] = 0x90;
                         globalPatchedSites.insert(callRVA);
