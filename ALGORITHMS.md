@@ -86,18 +86,21 @@ flowchart TD
 
 ## Vtable call devirtualization
 
-Once layouts are known, indirect vcalls `mov rax,[rcx]; call [rax+N]` get rewritten
-to direct `call sub_X`. Three resolver phases run after RTTI + type propagation:
+Once layouts are known, indirect vcalls and tail-call thunks of the form
+`mov rax,[rcx]; call|jmp [rax+N]` get rewritten to a direct `call`/`jmp sub_X`.
+Three resolver phases run after RTTI + type propagation:
 
 ```mermaid
 flowchart TD
-    SEED[Seed funcType:<br/>RTTI ctors, default_instances, proto messages] --> PROP
+    SEED[Seed funcType:<br/>RTTI class methods, proto messages,<br/>default_instances, .rdata fnptr arrays] --> PROP
     PROP[Bidirectional worklist:<br/>caller<->callee type flow] --> PA
 
     subgraph PA[Phase A: typed]
-        PA1[Per typed func F, vtRVA] --> PA2[Run pefix::ConstProp<br/>with seedReg = vtRVA]
-        PA2 --> PA3[Collect CALL with<br/>simplified+LABEL dst]
-        PA3 --> PA4[Patch E8 disp32, NOP tail]
+        PA1[Per typed func F, vtRVA] --> PA2[Run pefix::ConstProp<br/>with each of RCX/RDX/R8/R9/RBX/RSI/RDI<br/>seeded to TypedPtr vtRVA]
+        PA2 --> PA3[Collect CALL or JMP with<br/>simplified + LABEL dst]
+        PA3 --> PA4[Decode call/jmp base reg<br/>from raw bytes incl. REX.B]
+        PA4 --> PA5[Match preceding mov dst<br/>against call/jmp base]
+        PA5 --> PA6[Patch E8 CALL / E9 JMP + disp32,<br/>NOP absorbed mov tail]
     end
 
     PA --> PB
@@ -108,14 +111,27 @@ flowchart TD
 
     PB --> PC
     subgraph PC[Phase C: slot consensus]
-        PC1[For each remaining vcall] --> PC2[Check slot N across<br/>all 348 vtables]
+        PC1[For each remaining vcall] --> PC2[Check slot N across<br/>all known vtables]
         PC2 --> PC3{All vtables agree?}
         PC3 -->|Yes| PC4[Patch]
         PC3 -->|No| PC5[Skip]
     end
 ```
 
-Phase A does the heavy lifting -- it's where the dataflow engine (pefix::ConstProp,
-augmented with TypedPtr propagation through `mov rax,[rcx]` and CALL mem-operand
-resolution) converts the vtable seed into a concrete call target. Phases B and C
-sweep the residual cases.
+The preceding-mov absorb step covers three encodings:
+
+- 3-byte `mov reg, [base]`              (REX + 8B + modrm mod=00)
+- 4-byte `mov reg, [base + disp8]`      (REX + 8B + modrm mod=01 + disp8)
+- 7-byte `mov reg, [base + disp32]`     (REX + 8B + modrm mod=10 + disp32)
+
+Each is only absorbed when the mov's destination register matches the call/jmp's
+base register (accounting for REX.R and REX.B). This is what keeps the rewrite
+semantically safe when an unrelated `mov` happens to sit immediately in front.
+
+Phase A is where the bulk of patching lands; Phases B and C sweep residuals.
+Untyped sites that reduce to a single vtable target via brute force or that
+share a slot across every vtable (rare for class-specific layouts) get cleaned
+up there. Sites that survive all three phases are typically constructor entries
+that rewrite `rcx` from a parameter struct, container iterations with dynamic
+indices, or member-object vcalls -- cases where abstract interpretation alone
+cannot recover the type.
