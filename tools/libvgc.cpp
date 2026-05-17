@@ -1772,17 +1772,16 @@ int main(int argc, char* argv[]) {
                 if (passResolved.load() == 0) break;
             }
 
-            // Diagnose: count vtable call sites (mov rax,[Rn]; call [rax+N] pattern)
+            // Diagnose: count unpatched vtable call sites (3-byte mov + call disp form).
+            // Patched sites have their REX byte rewritten to E8/E9 and fall out of the scan.
             {
-                uint32_t totalVtSites = 0, inTyped = 0, inUntyped = 0;
-                uint32_t allIndirect = 0;
+                uint32_t unpatchedSites = 0, inTyped = 0, inUntyped = 0;
                 for (auto& fb : pdataAll2) {
                     if (fb.beginRVA < textVA2 || fb.beginRVA >= textEnd2) continue;
                     uint32_t fOff2 = pe.rvaToOffset(fb.beginRVA);
                     if (!fOff2) continue;
                     uint32_t fSz = fb.endRVA - fb.beginRVA;
                     for (uint32_t i = 3; i + 3 < fSz && i < 0x2000; i++) {
-                        // Look for: [REX] 8B modrm(mod=0,rm!=4,5) FF (50-57|90-97)
                         uint8_t b0 = pe.data[fOff2+i-3], b1 = pe.data[fOff2+i-2], b2 = pe.data[fOff2+i-1];
                         if ((b0 & 0xF8) != 0x48) continue; // REX.W
                         if (b1 != 0x8B) continue;
@@ -1794,17 +1793,15 @@ int main(int argc, char* argv[]) {
                         if (((cm >> 3) & 7) != 2) continue;
                         uint8_t cmod = cm >> 6;
                         if (cmod != 1 && cmod != 2) continue;
-                        allIndirect++;
                         uint32_t callRVA = fb.beginRVA + i;
                         if (globalPatchedSites.count(callRVA)) continue;
-                        if (pe.data[fOff2+i] == 0xE8) continue;
-                        totalVtSites++;
+                        unpatchedSites++;
                         if (funcType.count(fb.beginRVA)) inTyped++;
                         else inUntyped++;
                     }
                 }
-                cli::detail("[vtable-diag] %u total vtable-pattern sites, %u resolved, %u remaining (%u typed, %u untyped)",
-                       allIndirect, (uint32_t)globalPatchedSites.size(), totalVtSites, inTyped, inUntyped);
+                cli::detail("[vtable-diag] %u patched, %u unpatched (%u in typed funcs, %u in untyped)",
+                       (uint32_t)globalPatchedSites.size(), unpatchedSites, inTyped, inUntyped);
             }
 
             // B) Untyped functions: try all known vtables (small set so affordable)
