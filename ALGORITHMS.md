@@ -15,6 +15,10 @@ Two cross-library passes are covered in their owning repos:
   targets reachable from FBR-discovered functions the other layers miss. Full
   flowchart in
   **[libgriffin/ALGORITHMS.md#layered-xref-reachability](../libgriffin/ALGORITHMS.md)**.
+- **PFR (Phase 2 jump dispatcher unroll)** — pattern-matches Griffin pop+jmp
+  trampolines so register-indirect dispatch sites get a usable static alias
+  table. Full detail in
+  **[libgriffin/ALGORITHMS.md#pfr-jump-dispatcher-unroll](../libgriffin/ALGORITHMS.md)**.
 
 ## Griffin deobfuscation
 
@@ -129,6 +133,15 @@ flowchart TD
         PC3 -->|Yes| PC4[Patch]
         PC3 -->|No| PC5[Skip]
     end
+
+    PC --> PD
+    subgraph PD[Phase D: type-direct lookup]
+        PD1[For each typed func F<br/>funcType[F] = vtRVA] --> PD2[Scan body for unpatched<br/>call [reg+disp]]
+        PD2 --> PD3[target = .rdata read at<br/>vtRVA + disp]
+        PD3 --> PD4{target in .text exec?}
+        PD4 -->|Yes| PD5[Patch E8 disp32]
+        PD4 -->|No| PD6[Skip]
+    end
 ```
 
 The preceding-mov absorb step covers three encodings:
@@ -144,7 +157,58 @@ semantically safe when an unrelated `mov` happens to sit immediately in front.
 Phase A is where the bulk of patching lands; Phases B and C sweep residuals.
 Untyped sites that reduce to a single vtable target via brute force or that
 share a slot across every vtable (rare for class-specific layouts) get cleaned
-up there. Sites that survive all three phases are typically constructor entries
-that rewrite `rcx` from a parameter struct, container iterations with dynamic
-indices, or member-object vcalls -- cases where abstract interpretation alone
-cannot recover the type.
+up there.
+
+Phase D is the type-direct fallback. When Phase A's ConstProp fails to seed
+the base register (e.g. `this` arrives via a parameter or a memory load), the
+call still has a known disp and the containing function still has a known
+vtRVA via type propagation. Reading `vtRVA + disp` straight from `.rdata`
+recovers the callee without dataflow. Phase D never overwrites a site already
+patched by Phase A/B/C and rejects targets that don't land in an executable
+section, so it can't introduce false patches.
+
+Sites that survive all four phases are typically constructor entries that
+rewrite `rcx` from a parameter struct, container iterations with dynamic
+indices, or member-object vcalls — cases where neither dataflow nor a fixed
+vtable assumption recovers the type.
+
+## Call graph construction
+
+```mermaid
+flowchart TD
+    A[Scan .text + .grfn1 for E8 disp32] --> B[Compute call site + callee RVA]
+    B --> C{callee in PFR alias?}
+    C -->|Yes| C1[Rewrite callee to trampoline target]
+    C -->|No| D
+    C1 --> D{Resolve caller boundary}
+    D -->|.pdata range| D1[caller = pdata.beginRVA]
+    D -->|FBR findContaining| D2[caller = fb.startRVA]
+    D -->|.text RET-scan| D3[caller = byte after last RET<br/>skipping CC/NOP padding]
+    D -->|none| D4[Orphan: bucket by callee RVA]
+    D1 --> E[Append edge to callerToEdges]
+    D2 --> E
+    D3 --> E
+```
+
+The whole pass is wrapped in a lambda so it can run twice: once before vtable
+devirtualisation (consumed by type propagation seeds) and once after, when
+Phases A/B/C/D have rewritten enough indirect sites for the scan to pick up
+new edges. The orphan-target histogram is the static signal for whether
+protobuf method bodies are hiding inside FBR-missed functions — proto-body
+hits in this bucket mean boundary recovery is the next move.
+
+## vtable LEA probe
+
+```mermaid
+flowchart TD
+    A[Collect every protoResult2 vtable RVA] --> B[Scan .text for<br/>48/4C 8D modrm RIP-rel disp32]
+    B --> C{Target RVA matches a vtable?}
+    C -->|Yes| D[Record LEA site +<br/>containing function via pdata/FBR]
+    C -->|No| E[Skip]
+```
+
+A vtable VA loaded by RIP-rel LEA inside `.text` marks a candidate
+message-construction site. This is the static signal that survives when
+vtable-indirect call patching never reaches the method body — useful for
+mapping sub-message fields back to their owning C++ types (e.g. a `LEA
+ProtoX::vtable` inside another message's `Ctor` proves field-of-X is X).

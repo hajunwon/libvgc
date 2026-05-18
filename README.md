@@ -52,7 +52,8 @@ sit relative to the deobf and structural-analysis work.
 See **[ALGORITHMS.md](ALGORITHMS.md)** for the techniques used inside individual
 phases: Griffin deobfuscation (constprop, MBA, INT3, JMP L1-L5), protobuf discovery,
 _InternalParse identification, vtable layout recovery and call devirtualization
-(CALL + JMP tail-call thunks), and field setter search.
+(Phase A/B/C/D), call graph construction with layered caller resolution, the
+vtable LEA probe, and field setter search.
 
 ## Project structure
 
