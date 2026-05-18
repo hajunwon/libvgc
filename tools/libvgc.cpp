@@ -2,6 +2,7 @@
 #include "cli.h"
 #include <vgc/log.h>
 #include <pefix/log.h>
+#include <pefix/fbr.h>
 #include <griffin/log.h>
 #include <cstring>
 #include <cstdio>
@@ -866,6 +867,40 @@ int main(int argc, char* argv[]) {
         }
 
         // Export table generation deferred to end (after all symbols collected)
+
+        // === Phase 1 FBR — function boundary discovery beyond .pdata ===
+        // Measurement-only call. Seeds = .pdata + exports + RTTI vftable +
+        // data fn-ptr + UNWIND_INFO.ExceptionHandler. Expand via direct E8/E9.
+        // Compare against pdata-only baseline (seedsPdata) to quantify the
+        // .grfn1 functions the original pipeline never touched.
+        {
+            pefix::FbrConfig fbrCfg;
+            auto fbrResult = pefix::discoverFunctionBoundaries(pe, actualBase, fbrCfg);
+            uint32_t extraOverPdata = fbrResult.stats.finalTotal
+                                       - fbrResult.stats.seedsPdata;
+            cli::detail("FBR vs .pdata: baseline=%u  full=%u  +%u (.text=%u .grfn1+=%u)",
+                        fbrResult.stats.seedsPdata,
+                        fbrResult.stats.finalTotal,
+                        extraOverPdata,
+                        fbrResult.stats.finalTextFuncs,
+                        fbrResult.stats.finalGrfnFuncs);
+            uint32_t grfnPrinted = 0;
+            for (auto& fb : fbrResult.functions) {
+                if (!fb.inObfuscated) continue;
+                if (grfnPrinted >= 20) break;
+                cli::detail("  FBR .grfn1 sample: RVA=0x%X VA=0x%llX sources=0x%X count=%u end=0x%X",
+                            fb.startRVA, actualBase + fb.startRVA, fb.sources,
+                            fb.sourceCount, fb.endRVA);
+                grfnPrinted++;
+            }
+            uint32_t rejPrinted = 0;
+            for (uint32_t rva : fbrResult.stats.rejectSampleNoSignal) {
+                if (rejPrinted >= 20) break;
+                cli::detail("  FBR reject(no-signal) sample: RVA=0x%X VA=0x%llX",
+                            rva, actualBase + rva);
+                rejPrinted++;
+            }
+        }
 
         // Read .pdata function boundaries for correct function starts
         auto pdataFuncs = readPdataFunctions(pe);
@@ -3470,12 +3505,6 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    if (deobfScan) {
-        auto xr = griffin::resolveGriffinXrefs(pe, actualBase, 3);
-        cli::ok("Griffin xref resolve: %zu xrefs, %u unique .rdata targets",
-                xr.xrefs.size(), xr.uniqueTargets);
-    }
-
     // A5: Post-deobf NOP → CC conversion (IDA function boundary clarity)
     if (deobfScan) {
         uint32_t nopConverted = 0;
@@ -4080,6 +4109,52 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        // protoScan only records field-name strings, not the message's own
+        // container ("vanguard.<X>"). Descriptor-init wrappers LEA the
+        // container start, so sweep .rdata and register every distinct
+        // container RVA as a target so the LEA pass below can name the wrapper.
+        {
+            uint32_t rdStartX = 0, rdEndX = 0, rdRawX = 0;
+            for (int si = 0; si < pe.numSections; si++) {
+                char nm[9] = {}; memcpy(nm, pe.sections[si].Name, 8);
+                if (strcmp(nm, ".rdata") == 0) {
+                    rdStartX = pe.sections[si].VirtualAddress;
+                    rdEndX = rdStartX + pe.sections[si].Misc.VirtualSize;
+                    rdRawX = pe.sections[si].PointerToRawData;
+                    break;
+                }
+            }
+            uint32_t extras = 0;
+            if (rdStartX) {
+                std::unordered_set<uint32_t> existing;
+                for (auto& pd : protoDescs) existing.insert(pd.rva);
+                size_t endOff = pe.data.size();
+                size_t secLimit = (size_t)rdRawX + (rdEndX - rdStartX);
+                if (secLimit < endOff) endOff = secLimit;
+                for (size_t p = rdRawX; p + 11 < endOff; p++) {
+                    if (pe.data[p] != 'v') continue;
+                    if (memcmp(pe.data.data() + p, "vanguard.", 9) != 0) continue;
+                    std::string s;
+                    for (size_t i = 0; i < 128 && p + i < endOff; i++) {
+                        uint8_t c = pe.data[p + i];
+                        if (c == 0) break;
+                        if (c < 0x20 || c > 0x7E) { s.clear(); break; }
+                        s += (char)c;
+                    }
+                    if (s.size() < 11) continue;
+                    std::string after = s.substr(9);
+                    size_t fd = after.find('.');
+                    std::string msgShort = (fd == std::string::npos) ? after : after.substr(0, fd);
+                    if (msgShort.empty()) continue;
+                    uint32_t rva = rdStartX + (uint32_t)(p - rdRawX);
+                    if (!existing.insert(rva).second) continue;
+                    protoDescs.push_back({rva, msgShort + "_descriptor"});
+                    extras++;
+                }
+            }
+            if (extras) cli::detail("A9 extension: %u extra descriptor strings added", extras);
+        }
+
         // Scan for LEA rip+disp → proto descriptor
         std::unordered_set<uint32_t> protoDescSet;
         for (auto& pd : protoDescs) protoDescSet.insert(pd.rva);
@@ -4114,7 +4189,17 @@ int main(int argc, char* argv[]) {
                 }
                 if (namedFuncs.count(funcStart)) continue;
                 namedFuncs.insert(funcStart);
-                allNames.push_back({actualBase + funcStart, descToLabel[target] + "_" +
+                // Descriptor LEA identifies the wrapper directly via the message
+                // string it embeds, which is strictly more specific than RTTI
+                // vtable-slot inference (frequently false-positive on wrapper
+                // functions registered to unrelated class vtables) or generic
+                // proto vtable slot heuristics. Drop any prior label at this VA
+                // so this name wins as IDA's primary.
+                uint64_t fnVA = actualBase + funcStart;
+                allNames.erase(std::remove_if(allNames.begin(), allNames.end(),
+                    [fnVA](const NamedAddress& n) { return n.va == fnVA; }),
+                    allNames.end());
+                allNames.push_back({fnVA, descToLabel[target] + "_" +
                     std::to_string(funcStart & 0xFFFFF).substr(0,5)});
                 protoFuncsNamed++;
             }
@@ -5254,6 +5339,49 @@ int main(int argc, char* argv[]) {
             addSyntheticExports(pe, actualBase, exportNames);
             cli::info("Exports: %zu entries (filtered from %zu allNames)",
                    exportNames.size(), allNames.size());
+        }
+
+        // Xref summary runs AFTER synthetic exports so L2 root sees a populated
+        // export table (the raw dump has no exports).
+        if (deobfScan) {
+            auto xr = griffin::resolveGriffinXrefs(pe, actualBase, 3);
+            size_t l1Xrefs = xr.xrefs.size();
+            griffin::extendWithExportRoots(xr, pe, actualBase, 3);
+            size_t l2Xrefs = xr.xrefs.size();
+            griffin::extendWithFnPtrRoots(xr, pe, actualBase, 3);
+            size_t l3Xrefs = xr.xrefs.size();
+            // Side-by-side comparison: a separate run with strictOnly=true
+            // measures how much of L4 came from strong-anchor FBR functions
+            // versus weak-source ones. The main `xr` keeps the wider net.
+            {
+                griffin::XrefResult xrStrict = xr; // copy before L4
+                griffin::extendWithFbrRoots(xrStrict, pe, actualBase, 3, true);
+                cli::detail("  L4 fbr-strict candidates: +%u targets",
+                            xrStrict.layerTargets[griffin::XrefLayerFbr]);
+            }
+            griffin::extendWithFbrRoots(xr, pe, actualBase, 3, false);
+            size_t l4Xrefs = xr.xrefs.size();
+            griffin::expandSubstringTargets(xr, pe, actualBase);
+            cli::ok("Griffin xref resolve: %zu xrefs, %u unique .rdata targets",
+                    xr.xrefs.size(), xr.uniqueTargets);
+            cli::detail("  L1 grfn1:  %zu xrefs, %u targets",
+                        l1Xrefs, xr.layerTargets[griffin::XrefLayerGrfn1]);
+            cli::detail("  L2 export: +%zu xrefs, +%u targets",
+                        l2Xrefs - l1Xrefs, xr.layerTargets[griffin::XrefLayerExport]);
+            cli::detail("  L3 fnptr:  +%zu xrefs, +%u targets",
+                        l3Xrefs - l2Xrefs, xr.layerTargets[griffin::XrefLayerFnPtr]);
+            cli::detail("  L4 fbr:    +%zu xrefs, +%u targets",
+                        l4Xrefs - l3Xrefs, xr.layerTargets[griffin::XrefLayerFbr]);
+            cli::detail("  substring: +%zu xrefs",
+                        xr.xrefs.size() - l4Xrefs);
+            uint32_t l4Printed = 0;
+            for (auto& x : xr.xrefs) {
+                if (x.layer != griffin::XrefLayerFbr) continue;
+                if (l4Printed >= 20) break;
+                cli::detail("    L4 sample: caller RVA=0x%X target RVA=0x%X",
+                            x.instrRVA, x.targetRVA);
+                l4Printed++;
+            }
         }
 
         // COFF AFTER exports (COFF always last in file — not section data)

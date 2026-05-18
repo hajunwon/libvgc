@@ -18,7 +18,7 @@ flowchart TD
 
     subgraph P2[Phase 2: Import + Symbol Recovery]
         direction LR
-        P2A[.riot1 decode] ~~~ P2B[OpenSSL symbols] ~~~ P2C[RTTI classes] ~~~ P2D[Pointer chains]
+        P2A[.riot1 decode] ~~~ P2B[OpenSSL symbols] ~~~ P2C[RTTI classes] ~~~ P2D[Pointer chains] ~~~ P2E[FBR measure 1]
     end
 
     P2 --> P3
@@ -41,7 +41,7 @@ flowchart TD
 
     subgraph P5[Phase 5: Structural Analysis]
         direction LR
-        P5A[Protobuf schema] ~~~ P5B[Vtable resolve] ~~~ P5C[Type propagation] ~~~ P5D[Import chain BFS]
+        P5A[Protobuf schema] ~~~ P5B[Vtable resolve] ~~~ P5C[Type propagation] ~~~ P5D[Import chain BFS] ~~~ P5E[FBR measure 2 + L4 xref]
     end
 
     P5 --> OUTPUT[Export table + COFF symbols + Output PE]
@@ -50,3 +50,11 @@ flowchart TD
 Phase boundaries also gate two RIP-relative scan passes: the first runs after Phase 1
 so xref data feeds the symbol recovery in Phase 2; the second runs after Phase 4 so
 deobfuscated code contributes refs that Phase 5 needs for vtable and protobuf work.
+
+FBR runs twice. The first call sits in Phase 2 right after RTTI parsing — it
+reports the discoverable function set against the original `.pdata` baseline as
+a measurement-only sanity check, before any deobf has rewritten code. The second
+call sits at the top of Phase 5 once deobf has expanded the reachable instruction
+surface; its output feeds `griffin::extendWithFbrRoots` so xref reachability picks
+up FBR-only roots as an `XrefLayerFbr` (L4) augmentation. Both calls are
+side-effect free against the PE bytes — they read only.

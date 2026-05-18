@@ -3,6 +3,19 @@
 Phase-level orchestration is in [PIPELINE.md](PIPELINE.md). This file covers the
 specific techniques used inside individual phases.
 
+Two cross-library passes are covered in their owning repos:
+
+- **Function boundary recovery (FBR)** — multi-source seeds (pdata / export /
+  RTTI / EH / data fnptrs) plus caller-driven expansion through E8/E9 targets,
+  validated by a score-based filter. Pipeline runs it twice (Phase 2 measurement,
+  Phase 5 L4 input). Full flowchart in
+  **[libpefix/ALGORITHMS.md#function-boundary-recovery-fbr](../libpefix/ALGORITHMS.md)**.
+- **Layered xref reachability** — L1 `.grfn1` roots, L2 export roots, L3 fnptr
+  roots, plus the append-only L4 FBR augmentation that registers `.rdata`
+  targets reachable from FBR-discovered functions the other layers miss. Full
+  flowchart in
+  **[libgriffin/ALGORITHMS.md#layered-xref-reachability](../libgriffin/ALGORITHMS.md)**.
+
 ## Griffin deobfuscation
 
 ```mermaid

@@ -59,6 +59,7 @@
     <ClCompile Include="..\libpefix\src\x86_64\emu.cpp" />
     <ClCompile Include="..\libpefix\src\x86_64\trace.cpp" />
     <ClCompile Include="..\libpefix\src\analysis.cpp" />
+    <ClCompile Include="..\libpefix\src\fbr.cpp" />
     <!-- libgriffin sources -->
     <ClCompile Include="..\libgriffin\src\dispatch.cpp" />
     <ClCompile Include="..\libgriffin\src\int3.cpp" />
