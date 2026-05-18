@@ -194,7 +194,7 @@ void UnicornVGC::hookCode(uc_engine* uc, uint64_t addr, uint32_t size, void* use
             uint64_t val = 0;
             uc_reg_read(uc, regMap[targetReg], &val);
             self->jmpRegHits_.push_back({addr, val, iLen});
-            uc_emu_stop(uc); // Early exit — got what we need
+            uc_emu_stop(uc); // Early exit  - got what we need
         }
     }
 
@@ -215,7 +215,7 @@ void UnicornVGC::hookCode(uc_engine* uc, uint64_t addr, uint32_t size, void* use
         uc_mem_read(uc, rsp, &ci.caller, 8);
         self->calls_.push_back(ci);
 
-        // Set return value — the RET at this address will naturally pop and return
+        // Set return value  - the RET at this address will naturally pop and return
         uc_reg_write(uc, UC_X86_REG_RAX, &retval);
     }
 }
@@ -264,7 +264,7 @@ void UnicornVGC::hookIntr(uc_engine* uc, uint32_t intno, void* user) {
         uc_reg_write(uc, UC_X86_REG_RSP, &rsp);
         uc_reg_write(uc, UC_X86_REG_RIP, &retAddr);
 
-        // Stop current emulation — Unicorn will restart from new RIP
+        // Stop current emulation  - Unicorn will restart from new RIP
         uc_emu_stop(uc);
     }
 }
@@ -286,9 +286,9 @@ bool UnicornVGC::run(uint64_t startVA, uint64_t endVA, uint64_t maxInsns) {
     uint64_t end = endVA ? endVA : 0;
     uint64_t count = maxInsns ? maxInsns : 0;
 
-    // Per-run logging removed — batch progress in pe_fixer instead
+    // Per-run logging removed  - batch progress in pe_fixer instead
 
-    // Run in a loop — INT3 handler calls uc_emu_stop, we restart from new RIP
+    // Run in a loop  - INT3 handler calls uc_emu_stop, we restart from new RIP
     uint64_t totalInsns = 0;
     uint64_t curStart = startVA;
     uc_err err = UC_ERR_OK;

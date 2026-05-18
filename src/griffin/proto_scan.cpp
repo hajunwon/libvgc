@@ -1161,7 +1161,7 @@ FieldSetterTrace traceFieldSetters(const PEFile& pe, uint64_t imageBase,
             }
 
             // LEA with REX.W prefix and disp32 (mod=10, rm != 100)
-            // Exclude RSP(4)/RBP(5) as base — those are stack-relative, not object fields
+            // Exclude RSP(4)/RBP(5) as base  - those are stack-relative, not object fields
             if ((b[0] == 0x48 || b[0] == 0x4C || b[0] == 0x49 || b[0] == 0x4D) &&
                 b[1] == 0x8D) {
                 uint8_t modrm = b[2];
@@ -1182,7 +1182,7 @@ FieldSetterTrace traceFieldSetters(const PEFile& pe, uint64_t imageBase,
             }
 
             // ADD reg, imm32: 48/49 81 C0-C7 [imm32]
-            // Exclude RSP(4) and RBP(5) — those are stack/frame adjustments
+            // Exclude RSP(4) and RBP(5)  - those are stack/frame adjustments
             if ((b[0] == 0x48 || b[0] == 0x49) && b[1] == 0x81) {
                 uint8_t modrm = b[2];
                 if ((modrm & 0xF8) == 0xC0) { // /0 = ADD, reg direct

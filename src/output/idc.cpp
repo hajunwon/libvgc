@@ -173,7 +173,7 @@ void generateIdaScript(const char* path,
         return;
     }
 
-    fprintf(f, "# pe_fixer IDA Python script — auto-generated\n");
+    fprintf(f, "# pe_fixer IDA Python script  - auto-generated\n");
     fprintf(f, "# Adds cross-references for RIP-relative instructions found in the dumped PE.\n");
     fprintf(f, "# Usage: File -> Script file... -> select this .py\n");
     fprintf(f, "#\n");
@@ -214,7 +214,7 @@ void generateIdaScript(const char* path,
     fprintf(f, "            continue\n");
     fprintf(f, "\n");
     fprintf(f, "        if is_call or is_jmp:\n");
-    fprintf(f, "            # Indirect call/jmp through [rip+disp] — the target is a pointer\n");
+    fprintf(f, "            # Indirect call/jmp through [rip+disp]  - the target is a pointer\n");
     fprintf(f, "            idc.del_items(target_va, 0, 8)\n");
     fprintf(f, "            idc.create_qword(target_va)\n");
     fprintf(f, "            idaapi.add_dref(insn_va, target_va, idaapi.dr_R)\n");

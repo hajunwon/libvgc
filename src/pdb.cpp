@@ -118,7 +118,7 @@ bool generatePdb(PEFile& pe, uint64_t imageBase,
         memcpy(hdr->UniqueId, guid, 16);
     }
 
-    // Stream 2: TPI (empty — no type info)
+    // Stream 2: TPI (empty  - no type info)
     std::vector<uint8_t> tpiStream;
     {
         // Minimal TPI header
@@ -159,7 +159,7 @@ bool generatePdb(PEFile& pe, uint64_t imageBase,
         }
     }
 
-    // Stream 6: GSI (Global Symbol Index — empty hash table)
+    // Stream 6: GSI (Global Symbol Index  - empty hash table)
     std::vector<uint8_t> gsiStream;
     {
         // Minimal GSI header: just mark as empty
@@ -172,11 +172,11 @@ bool generatePdb(PEFile& pe, uint64_t imageBase,
         memcpy(gsiStream.data(), gsiHdr, sizeof(gsiHdr));
     }
 
-    // Stream 7: PSI (Public Symbol Index — references symStream)
+    // Stream 7: PSI (Public Symbol Index  - references symStream)
     std::vector<uint8_t> psiStream;
     {
         // Minimal PSI: hash header + symbol hash records
-        // For simplicity, empty hash — IDA falls back to linear search
+        // For simplicity, empty hash  - IDA falls back to linear search
         uint32_t psiHdr[5] = {};
         psiHdr[0] = (uint32_t)symStream.size() - 4; // SymHash size
         psiHdr[1] = 0; // AddrMap size

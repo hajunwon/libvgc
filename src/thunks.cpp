@@ -56,14 +56,14 @@ uint32_t resolveThunks(PEFile& pe) {
     std::unordered_map<uint32_t, uint32_t> thunkMap;
     uint32_t sizeOfImage = pe.nt->OptionalHeader.SizeOfImage;
 
-    // Pass 1: collect thunks from .text and .riot1 (NOT .grfn1 — those are obfuscation jmps)
+    // Pass 1: collect thunks from .text and .riot1 (NOT .grfn1  - those are obfuscation jmps)
     // Pattern: E9 XX XX XX XX followed by CC (strict: only INT3 terminator)
     // Preceded by CC, C3, or section start (function boundary)
     for (WORD i = 0; i < pe.numSections; i++) {
         if (!(pe.sections[i].Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
         char secName[9] = {};
         memcpy(secName, pe.sections[i].Name, 8);
-        // Skip .grfn1 — jmps there are part of obfuscation, not thunks
+        // Skip .grfn1  - jmps there are part of obfuscation, not thunks
         if (strncmp(secName, ".grfn", 5) == 0) continue;
 
         uint32_t rawOff = pe.sections[i].PointerToRawData;

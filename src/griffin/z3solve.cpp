@@ -372,7 +372,7 @@ static uint8_t randomSampleFilter(const std::vector<GrInstr>& chain, GrReg outpu
     return opMask;
 }
 
-// Pure concrete eval solver — no Z3 at runtime
+// Pure concrete eval solver  - no Z3 at runtime
 // 4 random trials × 64-bit: false positive ≈ 10^-58
 static Z3SimplifyResult solveChain(const std::vector<GrInstr>& chain, GrReg outputReg,
                                     uint8_t opHint = 0xFF) {
@@ -409,7 +409,7 @@ static Z3SimplifyResult solveChain(const std::vector<GrInstr>& chain, GrReg outp
     for (int r = 0; r < 16; r++) if (isInput[r]) inputs.push_back((uint16_t)r);
     if (inputs.empty() || inputs.size() > 3) return result;
 
-    // 4 random trials — each with independent seed
+    // 4 random trials  - each with independent seed
     uint64_t initVals[4][16];
     uint64_t outputs[4];
     for (int t = 0; t < 4; t++) {
@@ -611,7 +611,7 @@ static bool proveConstant(const std::vector<GrInstr>& chain, GrReg outputReg,
 
         for (auto& instr : chain) {
             if (instr.dead) continue;
-            ce.eval(instr); // best effort — skip failures
+            ce.eval(instr); // best effort  - skip failures
         }
 
         uint64_t val = ce.regs[(uint16_t)outputReg] & mask;
@@ -621,7 +621,7 @@ static bool proveConstant(const std::vector<GrInstr>& chain, GrReg outputReg,
 
     // 4 independent random trials all agree → probability of false positive ≈ 0
     // For 64-bit values: P(false positive) = 1/2^(64*3) ≈ 10^-58
-    // Skip Z3 verification — concrete eval is sufficient
+    // Skip Z3 verification  - concrete eval is sufficient
     constResult = guess;
     return true;
 }
@@ -668,7 +668,7 @@ int resolveOpaquePredicatesInBlock(GrBlock& blk) {
         auto& instr = blk.instrs[i];
         if (instr.dead || instr.simplified) continue;
 
-        // Pattern 1: BT rX/[mem], N (N >= 16) — bit test on computed values
+        // Pattern 1: BT rX/[mem], N (N >= 16)  - bit test on computed values
         if (instr.op == GrOp::BT && (instr.src1.isReg() || instr.src1.isMem())
             && instr.src2.isImm() && instr.src2.imm >= 16) {
             std::vector<GrInstr> window;
@@ -735,7 +735,7 @@ int resolveOpaquePredicatesInBlock(GrBlock& blk) {
             instr.src2 = GrValue::None();
             instr.simplified = true;
 
-            // Don't mark window as dead — other instructions may have side effects
+            // Don't mark window as dead  - other instructions may have side effects
 
             resolved++;
         }
