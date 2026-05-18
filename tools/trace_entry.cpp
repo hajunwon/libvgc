@@ -55,9 +55,15 @@ int main(int argc, char* argv[]) {
            xr.layerTargets[griffin::XrefLayerExport]);
 
     size_t sz2 = xr.xrefs.size();
+    griffin::extendWithFnPtrRoots(xr, pe, imageBase, 3);
+    printf("L3 (+ fn ptr root):   %zu xrefs (+%zu), +%u unique targets\n",
+           xr.xrefs.size(), xr.xrefs.size() - sz2,
+           xr.layerTargets[griffin::XrefLayerFnPtr]);
+
+    size_t sz3 = xr.xrefs.size();
     griffin::expandSubstringTargets(xr, pe, imageBase);
     printf("After substring expansion: %zu xrefs (+%zu), %u total unique targets\n\n",
-           xr.xrefs.size(), xr.xrefs.size() - sz2, xr.uniqueTargets);
+           xr.xrefs.size(), xr.xrefs.size() - sz3, xr.uniqueTargets);
 
     printf("=== Searching for target strings ===\n\n");
     for (uint32_t tgt : targets) {
