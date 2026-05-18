@@ -60,6 +60,7 @@
     <ClCompile Include="..\libpefix\src\x86_64\trace.cpp" />
     <ClCompile Include="..\libpefix\src\analysis.cpp" />
     <ClCompile Include="..\libpefix\src\fbr.cpp" />
+    <ClCompile Include="..\libpefix\src\bldf.cpp" />
     <!-- libgriffin sources -->
     <ClCompile Include="..\libgriffin\src\dispatch.cpp" />
     <ClCompile Include="..\libgriffin\src\int3.cpp" />
@@ -68,6 +69,7 @@
     <ClCompile Include="..\libgriffin\src\patch.cpp" />
     <ClCompile Include="..\libgriffin\src\output.cpp" />
     <ClCompile Include="..\libgriffin\src\xref_trace.cpp" />
+    <ClCompile Include="..\libgriffin\src\dispatch_pfr.cpp" />
     <!-- libvgc sources -->
     <ClCompile Include="src\antidisasm.cpp" />
     <ClCompile Include="src\thunks.cpp" />

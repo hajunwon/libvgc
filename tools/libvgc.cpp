@@ -1,9 +1,11 @@
-// pe_fixer.cpp — CLI tool for libvgc
+// pe_fixer.cpp  - CLI tool for libvgc
 #include "cli.h"
 #include <vgc/log.h>
 #include <pefix/log.h>
 #include <pefix/fbr.h>
+#include <pefix/bldf.h>
 #include <griffin/log.h>
+#include <griffin/dispatch_pfr.h>
 #include <cstring>
 #include <cstdio>
 
@@ -299,7 +301,7 @@ int main(int argc, char* argv[]) {
             opt.NumberOfRvaAndSizes = 16;
         }
         // Keep import directory (IDA Imports tab). Zero garbage IAT/bound entries.
-        // IDA PE loader causes "?" at IAT addresses — this is a display-only issue,
+        // IDA PE loader causes "?" at IAT addresses  - this is a display-only issue,
         // not data loss. Import names also available via COFF symbols (imp_XXX).
         opt.DataDirectory[IMAGE_DIRECTORY_ENTRY_IAT] = {};
         opt.DataDirectory[IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT] = {};
@@ -537,9 +539,9 @@ int main(int argc, char* argv[]) {
         cli::ok("Decoded %zu import wrappers", importWrappers.size());
         resolveImportNames(importWrappers, pe);
 
-        // Import wrappers end with "jmp rax" — IDA can't fully analyze callers.
+        // Import wrappers end with "jmp rax"  - IDA can't fully analyze callers.
         // Tested "call rax; ret" conversion but it causes "positive sp value" errors.
-        // Leave as jmp rax — IDA handles tail jumps better than unknown calls.
+        // Leave as jmp rax  - IDA handles tail jumps better than unknown calls.
 
         if (verbose) {
             for (size_t j = 0; j < importWrappers.size(); j++)
@@ -726,7 +728,7 @@ int main(int argc, char* argv[]) {
         cli::ok("Vtable calls (static): %u resolved, %u patched (%.0f ms)",
                vtblResolved, vtblPatched, tVtbl.elapsedMs());
         // Note: vtable call → direct call requires type propagation (which register
-        // holds which class). This is beyond PE-level patching — IDA handles it via
+        // holds which class). This is beyond PE-level patching  - IDA handles it via
         // type system. Proto vtable method names are added as COFF symbols instead.
     }
 
@@ -836,7 +838,7 @@ int main(int argc, char* argv[]) {
                 uint8_t b2 = pe.data[afterOff + 2];
 
                 bool isVtWrite = false;
-                // Pattern: [48|4C] 89 modrm — MOV [reg], reg (64-bit store)
+                // Pattern: [48|4C] 89 modrm  - MOV [reg], reg (64-bit store)
                 if ((b0 == 0x48 || b0 == 0x4C || b0 == 0x49) && b1 == 0x89) {
                     uint8_t mod = b2 >> 6;
                     uint8_t rm = b2 & 7;
@@ -868,14 +870,13 @@ int main(int argc, char* argv[]) {
 
         // Export table generation deferred to end (after all symbols collected)
 
-        // === Phase 1 FBR — function boundary discovery beyond .pdata ===
-        // Measurement-only call. Seeds = .pdata + exports + RTTI vftable +
-        // data fn-ptr + UNWIND_INFO.ExceptionHandler. Expand via direct E8/E9.
-        // Compare against pdata-only baseline (seedsPdata) to quantify the
-        // .grfn1 functions the original pipeline never touched.
+        // Phase 1 FBR. Seeds: .pdata + exports + RTTI vftable + data fn-ptr +
+        // UNWIND_INFO.ExceptionHandler. Expand via E8/E9. fbrResult kept in
+        // scope so protoScan/callgraph passes can use .grfn1 starts as
+        // caller-frame boundaries.
+        pefix::FbrConfig fbrCfg;
+        auto fbrResult = pefix::discoverFunctionBoundaries(pe, actualBase, fbrCfg);
         {
-            pefix::FbrConfig fbrCfg;
-            auto fbrResult = pefix::discoverFunctionBoundaries(pe, actualBase, fbrCfg);
             uint32_t extraOverPdata = fbrResult.stats.finalTotal
                                        - fbrResult.stats.seedsPdata;
             cli::detail("FBR vs .pdata: baseline=%u  full=%u  +%u (.text=%u .grfn1+=%u)",
@@ -1192,7 +1193,7 @@ int main(int argc, char* argv[]) {
                    protoSymsAdded, protoCallersFound);
         }
 
-        // Early hidden function discovery — expands known functions before type propagation
+        // Early hidden function discovery  - expands known functions before type propagation
         // Validation-based: each source is verified before accepting
         {
             Timer tHidden;
@@ -1330,6 +1331,32 @@ int main(int argc, char* argv[]) {
             auto protoResult2 = scanAllProtoMessages(pe, actualBase);
             uint32_t soi = pe.nt->OptionalHeader.SizeOfImage;
 
+            // Phase 2 PFR. JmpCCpad disabled by PfrConfig default after
+            // 100% FP on vgc.
+            griffin::PfrResult pfr = griffin::extractJumpDispatchers(pe, actualBase);
+            std::unordered_map<uint32_t, uint32_t> pfrAlias;
+            pfrAlias.reserve(pfr.dispatchers.size());
+            for (auto& d : pfr.dispatchers) pfrAlias[d.sourceRVA] = d.targetRVA;
+            {
+                uint32_t bySec[16] = {};
+                for (auto& d : pfr.dispatchers)
+                    if (d.inSectionIdx < 16) bySec[d.inSectionIdx]++;
+                cli::detail("  PFR by section: sec0=%u sec1=%u sec2=%u sec5=%u sec6=%u sec7=%u sec8=%u sec9=%u",
+                            bySec[0], bySec[1], bySec[2], bySec[5], bySec[6], bySec[7], bySec[8], bySec[9]);
+                cli::detail("  PFR target sections: text=%u grfn=%u riot=%u (out=%u)",
+                            pfr.stats.targetsToText, pfr.stats.targetsToGrfn,
+                            pfr.stats.targetsToRiot, pfr.stats.targetsOutOfImage);
+
+                // vgc smoke test: 0x6D1175 must alias to 0x661009.
+                auto it = pfrAlias.find(0x6D1175);
+                if (it != pfrAlias.end()) {
+                    cli::detail("  PFR known: 0x6D1175 -> 0x%X (expected 0x661009)", it->second);
+                } else {
+                    cli::detail("  PFR known: 0x6D1175 NOT in alias map");
+                }
+                cli::detail("  PFR alias entries: %zu", pfrAlias.size());
+            }
+
             // Collect all protobuf function RVAs (vtable methods)
             std::set<uint32_t> protoFuncRVAs;
             for (auto& msg : protoResult2.messages) {
@@ -1459,47 +1486,152 @@ int main(int argc, char* argv[]) {
                 }
             }
 
-            // Build call graph from .text E8 instructions
+            // Build call graph from .text + .grfn1 E8 sites.
+            // Caller resolution: pdata -> FBR -> .text RET-scan -> orphan.
+            // PFR alias rewrites trampoline callees to their real target.
+            // Lambda so we can re-run after Phase A/B/C devirt picks up new
+            // E8 edges from patched vtable-indirect sites.
             struct CallEdge { uint32_t callerRVA; uint32_t calleeRVA; uint32_t callSiteRVA; };
+            struct CallGraphStats {
+                uint32_t pfrAliasedEdges = 0;
+                uint32_t grfn1CallSites = 0;
+                uint32_t orphanCallSites = 0;
+                uint32_t pdataResolved = 0;
+                uint32_t fbrResolved = 0;
+                uint32_t retScanResolved = 0;
+                // orphan call-target histogram. Reveals whether protobuf
+                // method bodies are reachable only via FBR-missed callers.
+                std::unordered_map<uint32_t, uint32_t> orphanTargets;
+            };
             std::unordered_map<uint32_t, std::vector<CallEdge>> callerToEdges;
-            {
-                int textSec = -1;
-                for (int si2 = 0; si2 < pe.numSections; si2++) {
-                    char sn[9] = {}; memcpy(sn, pe.sections[si2].Name, 8);
-                    if (strcmp(sn, ".text") == 0) { textSec = si2; break; }
-                }
-                if (textSec >= 0) {
-                    uint32_t tRaw = pe.sections[textSec].PointerToRawData;
-                    uint32_t tSz = pe.sections[textSec].SizeOfRawData;
-                    uint32_t tVA = pe.sections[textSec].VirtualAddress;
-                    // Sorted function starts for binary search
-                    auto pdataAll = readPdataFunctions(pe);
-                    std::vector<uint32_t> funcStarts;
-                    for (auto& fb : pdataAll)
-                        if (fb.beginRVA >= tVA && fb.beginRVA < tVA + tSz)
-                            funcStarts.push_back(fb.beginRVA);
-                    // Include hidden functions in call graph
-                    for (auto& fb : extraFunctions)
-                        if (fb.beginRVA >= tVA && fb.beginRVA < tVA + tSz)
-                            funcStarts.push_back(fb.beginRVA);
-                    std::sort(funcStarts.begin(), funcStarts.end());
-                    funcStarts.erase(std::unique(funcStarts.begin(), funcStarts.end()), funcStarts.end());
 
-                    for (uint32_t p = 0; p + 5 < tSz; p++) {
-                        uint32_t off = tRaw + p;
-                        if (pe.data[off] != 0xE8) continue;
-                        int32_t disp = *(int32_t*)(pe.data.data() + off + 1);
-                        uint32_t callSiteRVA = tVA + p;
-                        uint32_t calleeRVA = callSiteRVA + 5 + disp;
-                        if (calleeRVA < tVA || calleeRVA >= tVA + tSz) continue;
-                        // Find containing function
-                        auto it = std::upper_bound(funcStarts.begin(), funcStarts.end(), callSiteRVA);
-                        if (it == funcStarts.begin()) continue;
-                        uint32_t callerRVA = *--it;
-                        callerToEdges[callerRVA].push_back({callerRVA, calleeRVA, callSiteRVA});
+            auto pdataAll = readPdataFunctions(pe);
+            std::vector<FuncBoundary> pdataSorted = pdataAll;
+            std::sort(pdataSorted.begin(), pdataSorted.end(),
+                      [](const FuncBoundary& a, const FuncBoundary& b) {
+                          return a.beginRVA < b.beginRVA;
+                      });
+            auto pdataFind = [&](uint32_t rva) -> const FuncBoundary* {
+                auto it = std::upper_bound(pdataSorted.begin(), pdataSorted.end(),
+                                            rva,
+                    [](uint32_t r, const FuncBoundary& f) { return r < f.beginRVA; });
+                if (it == pdataSorted.begin()) return nullptr;
+                --it;
+                if (rva >= it->endRVA) return nullptr;
+                return &*it;
+            };
+            int textSec = -1, grfnSec = -1;
+            for (int si2 = 0; si2 < pe.numSections; si2++) {
+                char sn[9] = {}; memcpy(sn, pe.sections[si2].Name, 8);
+                if (strcmp(sn, ".text") == 0) textSec = si2;
+                else if (strcmp(sn, ".grfn1") == 0) grfnSec = si2;
+            }
+
+            // RET-scan layer 3: for orphan call sites, treat the byte after
+            // the nearest preceding RET (skipping CC/NOP) as the enclosing
+            // function's start. Recovers FBR-missed tail-called helpers.
+            std::vector<uint32_t> textRetRVAs;
+            if (textSec >= 0) {
+                uint32_t tRaw = pe.sections[textSec].PointerToRawData;
+                uint32_t tSz  = pe.sections[textSec].SizeOfRawData;
+                uint32_t tVA  = pe.sections[textSec].VirtualAddress;
+                if (tRaw + tSz > pe.data.size())
+                    tSz = (uint32_t)pe.data.size() - tRaw;
+                textRetRVAs.reserve(tSz / 16);
+                for (uint32_t p = 0; p < tSz; p++) {
+                    uint8_t b = pe.data[tRaw + p];
+                    if (b == 0xC3) {
+                        textRetRVAs.push_back(tVA + p);
+                    } else if (b == 0xC2 && p + 2 < tSz) {
+                        textRetRVAs.push_back(tVA + p + 2);
                     }
                 }
             }
+            auto findFuncStartAfterRet = [&](uint32_t callSiteRVA) -> uint32_t {
+                if (textRetRVAs.empty() || textSec < 0) return 0;
+                uint32_t tRaw = pe.sections[textSec].PointerToRawData;
+                uint32_t tVA  = pe.sections[textSec].VirtualAddress;
+                uint32_t tSz  = pe.sections[textSec].SizeOfRawData;
+                if (callSiteRVA < tVA || callSiteRVA >= tVA + tSz) return 0;
+                auto it = std::upper_bound(textRetRVAs.begin(), textRetRVAs.end(), callSiteRVA);
+                if (it == textRetRVAs.begin()) return 0;
+                --it;
+                uint32_t afterRetRVA = *it + 1;
+                while (afterRetRVA < callSiteRVA &&
+                       (pe.data[tRaw + (afterRetRVA - tVA)] == 0xCC ||
+                        pe.data[tRaw + (afterRetRVA - tVA)] == 0x90)) {
+                    afterRetRVA++;
+                }
+                if (afterRetRVA >= callSiteRVA) return 0;
+                return afterRetRVA;
+            };
+
+            auto buildCallEdges = [&]() {
+                callerToEdges.clear();
+                CallGraphStats st;
+                auto scanSection = [&](int secIdx, bool isGrfn) {
+                    if (secIdx < 0) return;
+                    uint32_t sRaw = pe.sections[secIdx].PointerToRawData;
+                    uint32_t sSz  = pe.sections[secIdx].SizeOfRawData;
+                    uint32_t sVA  = pe.sections[secIdx].VirtualAddress;
+                    if (sRaw + sSz > pe.data.size())
+                        sSz = (uint32_t)pe.data.size() - sRaw;
+                    for (uint32_t p = 0; p + 5 < sSz; p++) {
+                        uint32_t off = sRaw + p;
+                        if (pe.data[off] != 0xE8) continue;
+                        int32_t disp = *(int32_t*)(pe.data.data() + off + 1);
+                        uint32_t callSiteRVA = sVA + p;
+                        uint32_t calleeRVA = callSiteRVA + 5 + disp;
+                        if (calleeRVA >= soi) continue;
+                        int tSec = pe.findSection(calleeRVA);
+                        if (tSec < 0 || !pe.isExecutableSection(tSec)) continue;
+                        auto pa = pfrAlias.find(calleeRVA);
+                        if (pa != pfrAlias.end()) {
+                            calleeRVA = pa->second;
+                            st.pfrAliasedEdges++;
+                        }
+                        uint32_t callerRVA = 0;
+                        if (auto* pf = pdataFind(callSiteRVA)) {
+                            callerRVA = pf->beginRVA;
+                            st.pdataResolved++;
+                        } else if (auto* fb = fbrResult.findContaining(callSiteRVA)) {
+                            callerRVA = fb->startRVA;
+                            st.fbrResolved++;
+                        } else if (!isGrfn) {
+                            // RET-scan disabled for .grfn1: tail-jmp + mid-
+                            // function INT3 padding break the heuristic.
+                            uint32_t guess = findFuncStartAfterRet(callSiteRVA);
+                            if (guess) {
+                                callerRVA = guess;
+                                st.retScanResolved++;
+                            } else {
+                                st.orphanCallSites++;
+                                st.orphanTargets[calleeRVA]++;
+                                continue;
+                            }
+                        } else {
+                            st.orphanCallSites++;
+                            st.orphanTargets[calleeRVA]++;
+                            continue;
+                        }
+                        callerToEdges[callerRVA].push_back({callerRVA, calleeRVA, callSiteRVA});
+                        if (isGrfn) st.grfn1CallSites++;
+                    }
+                };
+                scanSection(textSec, false);
+                scanSection(grfnSec, true);
+                return st;
+            };
+
+            CallGraphStats cgStats1 = buildCallEdges();
+            cli::detail("  callerToEdges[pre-devirt]: %zu callers, %u PFR-aliased, "
+                        "%u .grfn1 sites, %u orphan "
+                        "(pdata=%u fbr=%u retScan=%u)",
+                        callerToEdges.size(), cgStats1.pfrAliasedEdges,
+                        cgStats1.grfn1CallSites, cgStats1.orphanCallSites,
+                        cgStats1.pdataResolved, cgStats1.fbrResolved,
+                        cgStats1.retScanResolved);
+
 
             // Also seed: any function that CALLS a constructor/New gets the return type
             // text_E09E0 returns AuthReq*, text_DC880 takes AuthReq* as first arg
@@ -1524,7 +1656,7 @@ int main(int argc, char* argv[]) {
                     for (uint32_t p = 0; p + 8 <= sz2; p += 8) {
                         if (*(uint64_t*)(pe.data.data() + raw2 + p) == vtVA) {
                             uint32_t diRVA = va2 + p;
-                            // Scan callers of all vtable methods — add callers as seeds
+                            // Scan callers of all vtable methods  - add callers as seeds
                             for (auto& [callerRVA, edges] : callerToEdges) {
                                 for (auto& edge : edges) {
                                     if (funcToDefaultInst.count(edge.calleeRVA)) {
@@ -1809,8 +1941,11 @@ int main(int argc, char* argv[]) {
 
             // Diagnose: count unpatched vtable call sites (3-byte mov + call disp form).
             // Patched sites have their REX byte rewritten to E8/E9 and fall out of the scan.
+            // Also bucket by ModRM disp so we can see whether unpatched sites
+            // concentrate on AuthRequest-specific slot offsets (0xB0..0xF0).
             {
                 uint32_t unpatchedSites = 0, inTyped = 0, inUntyped = 0;
+                std::map<int32_t, uint32_t> dispDist;
                 for (auto& fb : pdataAll2) {
                     if (fb.beginRVA < textVA2 || fb.beginRVA >= textEnd2) continue;
                     uint32_t fOff2 = pe.rvaToOffset(fb.beginRVA);
@@ -1833,10 +1968,26 @@ int main(int argc, char* argv[]) {
                         unpatchedSites++;
                         if (funcType.count(fb.beginRVA)) inTyped++;
                         else inUntyped++;
+                        int32_t disp = 0;
+                        if (cmod == 1) disp = (int8_t)pe.data[fOff2 + i + 2];
+                        else            disp = *(int32_t*)(pe.data.data() + fOff2 + i + 2);
+                        dispDist[disp]++;
                     }
                 }
                 cli::detail("[vtable-diag] %u patched, %u unpatched (%u in typed funcs, %u in untyped)",
                        (uint32_t)globalPatchedSites.size(), unpatchedSites, inTyped, inUntyped);
+                // Top 12 disp values among unpatched sites.
+                std::vector<std::pair<int32_t,uint32_t>> dispRanked(dispDist.begin(), dispDist.end());
+                std::sort(dispRanked.begin(), dispRanked.end(),
+                          [](auto& a, auto& b) { return a.second > b.second; });
+                std::string ds;
+                for (size_t k = 0; k < dispRanked.size() && k < 12; k++) {
+                    char buf[32];
+                    snprintf(buf, sizeof(buf), " 0x%X=%u", dispRanked[k].first,
+                             dispRanked[k].second);
+                    ds += buf;
+                }
+                cli::detail("[vtable-diag] top unpatched disp:%s", ds.c_str());
             }
 
             // B) Untyped functions: try all known vtables (small set so affordable)
@@ -2038,8 +2189,234 @@ int main(int argc, char* argv[]) {
                 }
             }
             cli::detail("Phase C (slot consensus): %u resolved", phaseC);
+
+            // Phase D: type-direct lookup. For typed function f with
+            // funcType[f] = vtRVA, resolve unpatched `call [reg+disp]` via
+            // vtable[disp] directly. Phase A missed these when the base
+            // register escaped through mem load or parameter passing.
+            // Safe because globalPatchedSites prevents overwriting Phase A
+            // results, and reads only fail-closed (.text exec section check).
+            uint32_t phaseD = 0;
+            uint32_t phaseDRejTargetSec = 0, phaseDRejVtMissing = 0;
+
+            for (auto& fb : pdataAll2) {
+                if (fb.beginRVA < textVA2 || fb.beginRVA >= textEnd2) continue;
+                auto ftIt = funcType.find(fb.beginRVA);
+                if (ftIt == funcType.end()) continue;
+                uint32_t myVt = ftIt->second;
+                uint32_t myVtOff = pe.rvaToOffset(myVt);
+                if (!myVtOff) { phaseDRejVtMissing++; continue; }
+                uint32_t fOff2 = pe.rvaToOffset(fb.beginRVA);
+                if (!fOff2) continue;
+                uint32_t fSz = fb.endRVA - fb.beginRVA;
+
+                for (uint32_t i = 3; i + 3 < fSz && i < 0x2000; i++) {
+                    uint8_t b0 = pe.data[fOff2 + i - 3];
+                    uint8_t b1 = pe.data[fOff2 + i - 2];
+                    uint8_t b2 = pe.data[fOff2 + i - 1];
+                    if ((b0 & 0xF8) != 0x48) continue;
+                    if (b1 != 0x8B) continue;
+                    uint8_t mod = b2 >> 6, rm = b2 & 7;
+                    if (mod != 0 || rm == 4 || rm == 5) continue;
+                    if (pe.data[fOff2 + i] != 0xFF) continue;
+                    uint8_t cm = pe.data[fOff2 + i + 1];
+                    if (((cm >> 3) & 7) != 2) continue;
+                    uint8_t cmod = cm >> 6;
+                    if (cmod != 1 && cmod != 2) continue;
+                    uint32_t callRVA = fb.beginRVA + i;
+                    if (globalPatchedSites.count(callRVA)) continue;
+
+                    int32_t disp = 0;
+                    uint32_t dispLen = 0;
+                    if (cmod == 1) { disp = (int8_t)pe.data[fOff2 + i + 2]; dispLen = 1; }
+                    else            { disp = *(int32_t*)(pe.data.data() + fOff2 + i + 2); dispLen = 4; }
+                    if (disp < 0) continue;
+                    if ((disp & 7) != 0) continue; // 8-byte slot alignment
+                    if ((uint32_t)disp >= 0x100)   continue; // sane vtable size
+
+                    uint32_t slotFOff = myVtOff + (uint32_t)disp;
+                    if (slotFOff + 8 > pe.data.size()) continue;
+                    uint64_t targetVA = *(uint64_t*)(pe.data.data() + slotFOff);
+                    if (targetVA < actualBase || targetVA >= actualBase + soi) continue;
+                    uint32_t targetRVA = (uint32_t)(targetVA - actualBase);
+                    int ts = pe.findSection(targetRVA);
+                    if (ts < 0 || !pe.isExecutableSection(ts)) {
+                        phaseDRejTargetSec++; continue;
+                    }
+
+                    uint32_t callLen = 2 + dispLen;       // FF MODRM disp{1,4}
+                    uint32_t patchOff = fOff2 + i - 3;
+                    uint32_t patchRVA = callRVA - 3;
+                    uint32_t totalLen = 3 + callLen;
+                    if (totalLen < 5) continue;
+
+                    int32_t d = (int32_t)(targetRVA - (patchRVA + 5));
+                    pe.data[patchOff] = 0xE8;
+                    memcpy(pe.data.data() + patchOff + 1, &d, 4);
+                    for (uint32_t n = 5; n < totalLen; n++) pe.data[patchOff + n] = 0x90;
+                    globalPatchedSites.insert(callRVA);
+                    vtCallResolved++;
+                    phaseD++;
+                }
+            }
+            cli::detail("Phase D (type-direct lookup): %u resolved (rej target-sec=%u vt-missing=%u)",
+                        phaseD, phaseDRejTargetSec, phaseDRejVtMissing);
             cli::detail("[vtable-resolve] %u vtable calls patched (%.0f ms)",
                    vtCallResolved, tVtProp.elapsedMs());
+
+
+            // Phase A/B/C/D rewrote vtable-indirect sites to E8 directs in
+            // pe.data; re-scan to pick up the new edges.
+            size_t edgesBefore = 0;
+            for (auto& [c, edges] : callerToEdges) edgesBefore += edges.size();
+            CallGraphStats cgStats2 = buildCallEdges();
+            size_t edgesAfter = 0;
+            for (auto& [c, edges] : callerToEdges) edgesAfter += edges.size();
+            cli::detail("  callerToEdges[post-devirt]: %zu callers, +%zd new edges",
+                        callerToEdges.size(),
+                        (ssize_t)edgesAfter - (ssize_t)edgesBefore);
+            cli::detail("    stats: PFR-aliased=%u .grfn1=%u orphan=%u "
+                        "(pdata=%u fbr=%u retScan=%u)",
+                        cgStats2.pfrAliasedEdges, cgStats2.grfn1CallSites,
+                        cgStats2.orphanCallSites,
+                        cgStats2.pdataResolved, cgStats2.fbrResolved,
+                        cgStats2.retScanResolved);
+
+            // Orphan target distribution. Proto method bodies showing up
+            // here would mean a fill caller is hiding in an FBR-missed
+            // function and boundary recovery should be improved.
+            {
+                std::vector<std::pair<uint32_t,uint32_t>> ranked(
+                    cgStats2.orphanTargets.begin(), cgStats2.orphanTargets.end());
+                std::sort(ranked.begin(), ranked.end(),
+                          [](auto& a, auto& b) { return a.second > b.second; });
+                cli::detail("    orphan target distribution (top 15):");
+                for (size_t k = 0; k < ranked.size() && k < 15; k++) {
+                    uint32_t tRVA = ranked[k].first;
+                    int s = pe.findSection(tRVA);
+                    char sn[9] = {};
+                    if (s >= 0) memcpy(sn, pe.sections[s].Name, 8);
+                    cli::detail("      0x%X (%s) count=%u", tRVA, sn, ranked[k].second);
+                }
+                uint32_t totalBodyHits = 0;
+                for (auto& msg : protoResult2.messages) {
+                    if (!msg.vtableRVA) continue;
+                    uint32_t vtOff = pe.rvaToOffset(msg.vtableRVA);
+                    if (!vtOff) continue;
+                    uint32_t hits = 0;
+                    for (uint32_t i = 0; i < 32 && vtOff + (i + 1) * 8 <= pe.data.size(); i++) {
+                        uint64_t v = *(uint64_t*)(pe.data.data() + vtOff + i * 8);
+                        if (v < actualBase || v >= actualBase + soi) break;
+                        uint32_t rva = (uint32_t)(v - actualBase);
+                        auto ot = cgStats2.orphanTargets.find(rva);
+                        if (ot != cgStats2.orphanTargets.end()) hits += ot->second;
+                    }
+                    if (hits == 0) continue;
+                    cli::detail("      proto-body-in-orphan: %s vt=0x%X hits=%u",
+                                msg.fullName.c_str(), msg.vtableRVA, hits);
+                    totalBodyHits += hits;
+                }
+                cli::detail("    proto-body orphan hits total: %u / %u orphan sites",
+                            totalBodyHits, cgStats2.orphanCallSites);
+            }
+
+            // vtable-LEA probe: .text RIP-rel LEA to any proto vtable RVA.
+            // Each hit's containing function is a candidate message-setup
+            // site (the static signal that survives when vtable-indirect
+            // patches don't reach a method body).
+            {
+                std::unordered_map<uint32_t, std::string> vtNames;
+                for (auto& m : protoResult2.messages)
+                    if (m.vtableRVA) vtNames[m.vtableRVA] = m.fullName;
+                int tSec = -1;
+                for (int si = 0; si < pe.numSections; si++) {
+                    char sn[9] = {}; memcpy(sn, pe.sections[si].Name, 8);
+                    if (strcmp(sn, ".text") == 0) { tSec = si; break; }
+                }
+                if (tSec >= 0) {
+                    uint32_t tRaw = pe.sections[tSec].PointerToRawData;
+                    uint32_t tSz  = pe.sections[tSec].SizeOfRawData;
+                    uint32_t tVA  = pe.sections[tSec].VirtualAddress;
+                    if (tRaw + tSz > pe.data.size())
+                        tSz = (uint32_t)pe.data.size() - tRaw;
+                    std::unordered_map<uint32_t, std::vector<uint32_t>> vtHits;
+                    for (uint32_t p = 0; p + 7 < tSz; p++) {
+                        uint8_t b0 = pe.data[tRaw + p];
+                        if (b0 != 0x48 && b0 != 0x4C) continue;
+                        if (pe.data[tRaw + p + 1] != 0x8D) continue;
+                        uint8_t modrm = pe.data[tRaw + p + 2];
+                        if ((modrm & 0xC7) != 0x05) continue; // RIP-rel only
+                        int32_t disp = *(int32_t*)(pe.data.data() + tRaw + p + 3);
+                        uint32_t target = tVA + p + 7 + disp;
+                        if (!vtNames.count(target)) continue;
+                        vtHits[target].push_back(tVA + p);
+                    }
+                    cli::detail("[vt-lea] proto vtable LEA sites: %zu unique vtables hit",
+                                vtHits.size());
+                    for (auto& [vt, sites] : vtHits) {
+                        cli::detail("  vt=0x%X (%s)  - %zu LEA sites",
+                                    vt, vtNames[vt].c_str(), sites.size());
+                        uint32_t shown = 0;
+                        for (uint32_t s : sites) {
+                            if (shown >= 8) break;
+                            uint32_t funcRVA = 0;
+                            if (auto* pf = pdataFind(s)) funcRVA = pf->beginRVA;
+                            else if (auto* fb = fbrResult.findContaining(s))
+                                funcRVA = fb->startRVA;
+                            cli::detail("      LEA@0x%X (in func 0x%X)", s, funcRVA);
+                            shown++;
+                        }
+                        if (sites.size() > shown)
+                            cli::detail("      ... +%zu more", sites.size() - shown);
+                    }
+                }
+            }
+
+            // Reach probe  - for every protobuf message, count how many of its
+            // vtable-slot methods now have at least one E8 direct caller, and
+            // how many of those callers sit in `.grfn1`. Reads from
+            // protoResult2 + the live PE so no RVA is hard-coded.
+            {
+                std::unordered_map<uint32_t, std::vector<uint32_t>> rev;
+                for (auto& [c, edges] : callerToEdges)
+                    for (auto& e : edges) rev[e.calleeRVA].push_back(c);
+                auto inGrfn = [&](uint32_t rva) {
+                    return grfnSec >= 0
+                        && rva >= pe.sections[grfnSec].VirtualAddress
+                        && rva <  pe.sections[grfnSec].VirtualAddress
+                                 + pe.sections[grfnSec].Misc.VirtualSize;
+                };
+
+                uint32_t shownMsg = 0;
+                for (auto& msg : protoResult2.messages) {
+                    if (!msg.vtableRVA) continue;
+                    uint32_t vtOff = pe.rvaToOffset(msg.vtableRVA);
+                    if (!vtOff) continue;
+                    std::vector<uint32_t> slotRVAs;
+                    for (uint32_t i = 0; vtOff + (i + 1) * 8 <= pe.data.size(); i++) {
+                        uint64_t entryVA = *(uint64_t*)(pe.data.data() + vtOff + i * 8);
+                        if (entryVA < actualBase || entryVA >= actualBase + soi) break;
+                        uint32_t mRVA = (uint32_t)(entryVA - actualBase);
+                        int s = pe.findSection(mRVA);
+                        if (s < 0 || !pe.isExecutableSection(s)) break;
+                        slotRVAs.push_back(mRVA);
+                        if (slotRVAs.size() >= 32) break;
+                    }
+                    uint32_t total = 0, fromGrfn = 0;
+                    for (uint32_t mRVA : slotRVAs) {
+                        auto it = rev.find(mRVA);
+                        if (it == rev.end()) continue;
+                        total += (uint32_t)it->second.size();
+                        for (uint32_t c : it->second) if (inGrfn(c)) fromGrfn++;
+                    }
+                    if (total == 0) continue;
+                    cli::detail("  [reach] %s  vt=0x%X slots=%zu  callers=%u (.grfn1=%u)",
+                                msg.fullName.c_str(), msg.vtableRVA,
+                                slotRVAs.size(), total, fromGrfn);
+                    if (++shownMsg >= 20) break;
+                }
+
+            }
         }
 
         // Name hidden functions + orphan discoveries and add to allNames
@@ -2253,7 +2630,7 @@ int main(int argc, char* argv[]) {
         }
 
         if (grfnSec >= 0) {
-            // .grfn1 has no .pdata entries — find functions via call targets
+            // .grfn1 has no .pdata entries  - find functions via call targets
             std::set<uint32_t> funcSet;
             uint32_t grfnRaw = pe.sections[grfnSec].PointerToRawData;
             uint32_t grfnRawSz = pe.sections[grfnSec].SizeOfRawData;
@@ -2299,7 +2676,7 @@ int main(int argc, char* argv[]) {
                 }
             }
 
-            // Save original func set (for L4 Unicorn — orphans excluded from heavy emulation)
+            // Save original func set (for L4 Unicorn  - orphans excluded from heavy emulation)
             std::vector<uint32_t> originalGrfnFuncs(funcSet.begin(), funcSet.end());
 
             // Merge early-discovered hidden functions for L1/L2/L3/L3b (cheap passes)
@@ -2880,14 +3257,14 @@ int main(int argc, char* argv[]) {
                                     }
                                     if (foundChain) break;
                                 }
-                                // Pattern C: IMUL rax, reg, imm32 (48 69 XX [imm32]) — general form
+                                // Pattern C: IMUL rax, reg, imm32 (48 69 XX [imm32])  - general form
                                 if (pe.data[sOff] == 0x48 && pe.data[sOff+1] == 0x69 && (pe.data[sOff+2] >> 6) == 3) {
                                     imulConst = *(uint32_t*)(pe.data.data() + sOff + 3);
                                     if (imulConst != 0 && (imulConst & 1)) {
                                         foundChain = true;
                                         uint32_t afterImul = sOff + 7;
                                         if (afterImul + 3 <= rawOff + p && pe.data[afterImul] == 0x48 && pe.data[afterImul+1] == 0x03) {
-                                            // ADD rax, rdx follows — MBA pattern, addConst from NOT+IMUL
+                                            // ADD rax, rdx follows  - MBA pattern, addConst from NOT+IMUL
                                         }
                                     }
                                     if (foundChain) break;
@@ -2935,7 +3312,7 @@ int main(int argc, char* argv[]) {
                     struct UcTask { uint32_t funcRVA; std::vector<std::pair<int,uint32_t>> keys; std::vector<std::pair<uint32_t,uint8_t>> jmps; };
                     std::vector<UcTask> ucTasks;
                     {
-                        // Use ORIGINAL funcs only (orphans excluded from L4 — too expensive)
+                        // Use ORIGINAL funcs only (orphans excluded from L4  - too expensive)
                         for (auto funcRVA : originalGrfnFuncs) {
                             GrFunc tf; GriffinDisasm td(pe, actualBase);
                             if (!td.buildCFG(funcRVA, tf)) continue;
@@ -3117,10 +3494,10 @@ int main(int argc, char* argv[]) {
                         // that is a call target from .grfn1 trampolines
                         // Simpler: check if the .grfn1 function's first instruction is
                         // a trampoline that jumps to .text (already patched by trampoline pass)
-                        // These are already E9 jumps — nothing to do.
+                        // These are already E9 jumps  - nothing to do.
 
                         // Instead: find .grfn1 functions that CALL a .text function
-                        // with the same first few bytes (prologue match) — these are copies.
+                        // with the same first few bytes (prologue match)  - these are copies.
                         // Redirect the .grfn1 entry to the .text version.
 
                         // Practical approach: for each .grfn1 function entry from .pdata,
@@ -3164,7 +3541,7 @@ int main(int argc, char* argv[]) {
                                redirected, tRedir.elapsedMs());
                 }
 
-                // === Comprehensive sanitize pass ===
+                // Sanitize pass.
                 cli::detail("[Sanitize]");
                 uint32_t sanAD = 0, sanNopToCC = 0;
 
@@ -3238,7 +3615,7 @@ int main(int argc, char* argv[]) {
                                 uint8_t b2 = pe.data[rawOff + runStart - 2];
                                 if (b2 == 0xEB) terminatorBefore = true;
                             }
-                            // CALL near (E8 xx xx xx xx) — noreturn call
+                            // CALL near (E8 xx xx xx xx)  - noreturn call
                             if (runStart >= 5) {
                                 uint8_t bc = pe.data[rawOff + runStart - 5];
                                 if (bc == 0xE8) terminatorBefore = true;
@@ -3259,43 +3636,43 @@ int main(int argc, char* argv[]) {
                         // Pattern-match prologue
                         if (!prologueAfter && afterPos + 4 < rawSz) {
                             const uint8_t* a = pe.data.data() + rawOff + afterPos;
-                            // 48 89 5C 24 — mov [rsp+X], rbx
+                            // 48 89 5C 24  - mov [rsp+X], rbx
                             if (a[0] == 0x48 && a[1] == 0x89 && a[2] == 0x5C && a[3] == 0x24)
                                 prologueAfter = true;
-                            // 48 89 4C 24 — mov [rsp+X], rcx
+                            // 48 89 4C 24  - mov [rsp+X], rcx
                             if (a[0] == 0x48 && a[1] == 0x89 && a[2] == 0x4C && a[3] == 0x24)
                                 prologueAfter = true;
-                            // 48 89 6C 24 — mov [rsp+X], rbp
+                            // 48 89 6C 24  - mov [rsp+X], rbp
                             if (a[0] == 0x48 && a[1] == 0x89 && a[2] == 0x6C && a[3] == 0x24)
                                 prologueAfter = true;
-                            // 48 89 74 24 — mov [rsp+X], rsi
+                            // 48 89 74 24  - mov [rsp+X], rsi
                             if (a[0] == 0x48 && a[1] == 0x89 && a[2] == 0x74 && a[3] == 0x24)
                                 prologueAfter = true;
-                            // 48 83 EC — sub rsp, imm8
+                            // 48 83 EC  - sub rsp, imm8
                             if (a[0] == 0x48 && a[1] == 0x83 && a[2] == 0xEC)
                                 prologueAfter = true;
-                            // 48 81 EC — sub rsp, imm32
+                            // 48 81 EC  - sub rsp, imm32
                             if (a[0] == 0x48 && a[1] == 0x81 && a[2] == 0xEC)
                                 prologueAfter = true;
-                            // 48 8B C4 — mov rax, rsp
+                            // 48 8B C4  - mov rax, rsp
                             if (a[0] == 0x48 && a[1] == 0x8B && a[2] == 0xC4)
                                 prologueAfter = true;
-                            // 4C 8B DC — mov r11, rsp
+                            // 4C 8B DC  - mov r11, rsp
                             if (a[0] == 0x4C && a[1] == 0x8B && a[2] == 0xDC)
                                 prologueAfter = true;
-                            // 40 53/55/56/57 — push rbx/rbp/rsi/rdi
+                            // 40 53/55/56/57  - push rbx/rbp/rsi/rdi
                             if (a[0] == 0x40 && (a[1] == 0x53 || a[1] == 0x55 || a[1] == 0x56 || a[1] == 0x57))
                                 prologueAfter = true;
-                            // 41 54~57 — push r12~r15
+                            // 41 54~57  - push r12~r15
                             if (a[0] == 0x41 && a[1] >= 0x54 && a[1] <= 0x57)
                                 prologueAfter = true;
-                            // 55/53/56/57 — push rbp/rbx/rsi/rdi (without REX)
+                            // 55/53/56/57  - push rbp/rbx/rsi/rdi (without REX)
                             if (a[0] == 0x55 || a[0] == 0x53 || a[0] == 0x56 || a[0] == 0x57)
                                 prologueAfter = true;
-                            // E9 — JMP (trampoline entry)
+                            // E9  - JMP (trampoline entry)
                             if (a[0] == 0xE9)
                                 prologueAfter = true;
-                            // C3 — RET (stub function)
+                            // C3  - RET (stub function)
                             if (a[0] == 0xC3)
                                 prologueAfter = true;
                         }
@@ -3346,9 +3723,9 @@ int main(int argc, char* argv[]) {
                 cli::detail("Anti-disasm: %u", sanAD);
                 cli::detail("CC→NOP (clean slate): %u bytes", sanNopToCC);
 
-                // 4. Validate exports (skip — exports are generated by us, always valid)
+                // 4. Validate exports (skip  - exports are generated by us, always valid)
 
-                // NOP collapse removed — sanitize handles long NOPs (>=10 → CC)
+                // NOP collapse removed  - sanitize handles long NOPs (>=10 → CC)
                 // Short NOPs (1-9) stay as NOP inside functions
 
                 // Function boundary repair: ensure CC/INT3 before each function entry
@@ -3444,7 +3821,7 @@ int main(int argc, char* argv[]) {
                         }
 
                         // E9 = JMP trampoline: unwind prolog can never match a JMP instruction.
-                        // Remove unconditionally — functions are still found via COFF/exports.
+                        // Remove unconditionally  - functions are still found via COFF/exports.
                         if (firstByte == 0xE9) {
                             entry[0] = 0; entry[1] = 0; entry[2] = 0;
                             pdataInvalid++;
@@ -3480,7 +3857,7 @@ int main(int argc, char* argv[]) {
                             entry[0] = 0; entry[1] = 0; entry[2] = 0;
                             pdataInvalid++;
                         } else {
-                            // Function start is in patched area — remove entry
+                            // Function start is in patched area  - remove entry
                             entry[0] = 0;
                             entry[1] = 0;
                             entry[2] = 0;
@@ -3516,7 +3893,7 @@ int main(int argc, char* argv[]) {
             uint32_t nopRun = 0;
             for (uint32_t p = 0; p < rawSz; p++) {
                 if (pe.data[rawOff+p] == 0x90) { nopRun++; continue; }
-                // Convert NOP runs >= 4 bytes to CC (INT3) — marks dead code for IDA
+                // Convert NOP runs >= 4 bytes to CC (INT3)  - marks dead code for IDA
                 if (nopRun >= 4) {
                     for (uint32_t k = p - nopRun; k < p; k++) pe.data[rawOff+k] = 0xCC;
                     nopConverted += nopRun;
@@ -3768,7 +4145,7 @@ int main(int argc, char* argv[]) {
                 int32_t cd = *(int32_t*)(pe.data.data() + off + 1);
                 uint32_t callTarget = secRVA + p + 5 + cd;
                 if (stubToHandler.count(callTarget) && confirmedHandlers.count(stubToHandler[callTarget])) {
-                    // This jmp rax is dead code — the dispatch stub never returns
+                    // This jmp rax is dead code  - the dispatch stub never returns
                     pe.data[off+5] = 0xCC;
                     pe.data[off+6] = 0xCC;
                     deadJmpRax++;
@@ -3868,7 +4245,7 @@ int main(int argc, char* argv[]) {
                             // = rbp * (c1 - c2) + (-1) * c2 (mod 2^64)
                             // For each candidate target T:
                             //   T = rbp * (c1-c2) + FFFF...FF * c2
-                            //   rbp = (T - FFFF...FF * c2) / (c1 - c2) — need modular inverse
+                            //   rbp = (T - FFFF...FF * c2) / (c1 - c2)  - need modular inverse
                             int64_t diff = (int64_t)c1 - (int64_t)c2;
                             if (diff == 0) break;
                             // 64-bit modular inverse
@@ -3976,7 +4353,7 @@ int main(int argc, char* argv[]) {
         }
         // Phase R2: ALL stubs go to same central dispatcher
         // Key insight: all 1075 resolved stubs target the SAME address (central import resolver)
-        // Unresolved stubs ALSO target this same address — just patch them directly
+        // Unresolved stubs ALSO target this same address  - just patch them directly
         uint32_t riotDeobfed = 0;
         if (riotResolved > 0 && riotStubs > riotResolved) {
             // Find the common target from resolved stubs
@@ -4209,7 +4586,7 @@ int main(int argc, char* argv[]) {
                    protoFuncsNamed, tPdesc.elapsedMs());
     }
 
-    // Proto field setter trace — fully automatic pipeline:
+    // Proto field setter trace  - fully automatic pipeline:
     // 1. proto_scan → find message + serialize
     // 2. resolveVtable → find vtable + entries
     // 3. parseFromParseFunc → extract field→offset from Parse switch-case
@@ -4490,7 +4867,7 @@ int main(int argc, char* argv[]) {
             cli::detail("[Emulate] Target RVA: 0x%X", targetRVA);
             cli::detail("[Emulate] AuthReq at: 0x%llX", (unsigned long long)fakeAuthReq);
 
-            // Call New(arena=0) — allocates+constructs AuthReq
+            // Call New(arena=0)  - allocates+constructs AuthReq
             uint64_t result = uc.callFunction(actualBase + targetRVA, 0);
             cli::detail("[Emulate] Returned: 0x%llX", (unsigned long long)result);
 
@@ -5009,7 +5386,7 @@ int main(int argc, char* argv[]) {
                     uint32_t off2 = pe.rvaToOffset(fb2.beginRVA);
                     if (!off2 || off2 + 4 > pe.data.size()) continue;
                     uint8_t b0 = pe.data[off2], b1 = pe.data[off2+1], b2 = pe.data[off2+2];
-                    // Comprehensive prologue check (same as main valid check)
+                    // Prologue check, same set as the main scan above.
                     bool valid2 = false;
                     if (b0 == 0x48 || b0 == 0x49 || b0 == 0x4C || b0 == 0x4D) valid2 = true; // REX.*
                     if (b0 == 0x40 && b1 >= 0x50 && b1 <= 0x57) valid2 = true;
@@ -5095,7 +5472,7 @@ int main(int argc, char* argv[]) {
             cli::detail("Unreferenced pointer pairs in .rdata: %u", unreferencedStructs);
         }
 
-        // 8. IDA analysis interference check — per-section breakdown
+        // 8. IDA analysis interference check  - per-section breakdown
         {
             cli::info("=== IDA Friendliness Check ===");
             uint32_t totalDeadBytes = 0;
@@ -5288,7 +5665,7 @@ int main(int argc, char* argv[]) {
         }
 
         // === Filtered export table FIRST (before COFF, so .edata raw data is contiguous) ===
-        // NOTE: No VA dedup here — exports.cpp handles dedup with longest-name-wins policy
+        // NOTE: No VA dedup here  - exports.cpp handles dedup with longest-name-wins policy
         {
             uint32_t soiExp = pe.nt->OptionalHeader.SizeOfImage;
             std::vector<NamedAddress> exportNames;
@@ -5382,9 +5759,37 @@ int main(int argc, char* argv[]) {
                             x.instrRVA, x.targetRVA);
                 l4Printed++;
             }
+
+            // BLDF (Phase 6 v1): reconstruct byte-concat strings inside each
+            // FBR-discovered function and match them against .rdata. Provides
+            // caller attribution for strings that have zero LEA xrefs because
+            // Griffin builds them via a run of mov [stack+N], imm8 stores.
+            {
+                auto fbrForBldf = pefix::discoverFunctionBoundaries(pe, actualBase);
+                auto bldf = pefix::extractByteConcatStrings(pe, fbrForBldf.functions);
+                auto links = pefix::matchConcatStringsToRdata(pe, bldf);
+                cli::ok("BLDF: %u concat strings, %zu matched to .rdata",
+                        bldf.stats.stringsReconstructed, links.size());
+                uint32_t printed = 0;
+                for (auto& cs : bldf.strings) {
+                    if (printed >= 12) break;
+                    cli::detail("  BLDF sample: func=0x%X reg=%u off=%d len=%zu '%s'",
+                                cs.funcRVA, cs.bufferBaseReg, cs.bufferBaseOff,
+                                cs.content.size(), cs.content.c_str());
+                    printed++;
+                }
+                printed = 0;
+                for (auto& l : links) {
+                    if (printed >= 12) break;
+                    cli::detail("  BLDF -> rdata 0x%X = '%s' (built by func 0x%X)",
+                                l.rdataRVA, l.concat->content.c_str(), l.concat->funcRVA);
+                    printed++;
+                }
+            }
+
         }
 
-        // COFF AFTER exports (COFF always last in file — not section data)
+        // COFF AFTER exports (COFF always last in file  - not section data)
         std::vector<CoffSymEntry> finalCoffSyms;
         for (auto& n : allNames) {
             if (n.va < actualBase) continue;
@@ -5614,7 +6019,7 @@ int main(int argc, char* argv[]) {
                             }
                         }
                         // Fix .riot1 sp-analysis: if function starts with CC 90 (anti-disasm entry),
-                        // reset unwind to minimal — the obfuscated prologue breaks IDA stack tracking
+                        // reset unwind to minimal  - the obfuscated prologue breaks IDA stack tracking
                         if (fb == 0xCC || fb == 0x90) {
                             // Already handled above
                         } else if (cOff + 2 < pe.data.size() && pe.data[cOff] == 0xCC &&
